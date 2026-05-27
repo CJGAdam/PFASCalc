@@ -1,570 +1,753 @@
 # ==============================================================================
-# LIBRARIES
+# Dependencies & Environment
 # ==============================================================================
-library(shiny)
-library(bslib)      # Modern UI layout
-library(bsicons)    # Standardized icons (v0.1.2 Safe)
-library(reactable)  # Interactive data tables
-library(htmltools)  # Safe HTML building
-library(dplyr)      # Data wrangling
-library(tidyr)
-library(stringr)
-library(purrr)
-library(readr)
-library(janitor)
-library(rlang)
+library(shiny)          # Core framework
+library(bslib)          # UI components and layout
+library(bsicons)        # SVG icons
+library(reactable)      # Interactive data tables
+library(htmltools)      # HTML construction
+library(dplyr)          # Data manipulation
+library(shinyWidgets)   # Enhanced UI inputs
+
+# Base R fallback for null/NA coalescing
+`%||%` <- function(x, y) if (is.null(x) || length(x) == 0 || all(is.na(x))) y else x
+
+# Client-side CSV download handler
+# Allows file exports in WebR/Shinylive environments where a standard server-side 
+# downloadHandler is unavailable.
+js_download_script <- tags$head(tags$script(HTML("
+  $(document).on('shiny:sessioninitialized', function() {
+    Shiny.addCustomMessageHandler('download_csv', function(message) {
+      var blob = new Blob([message.csv_data], {type: 'text/csv;charset=utf-8;'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = url;
+      a.download = message.filename;
+      document.body.appendChild(a);
+      a.click();
+      URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    });
+  });
+")))
 
 # ==============================================================================
-# CONFIGURATION & CONSTANTS
+# Configuration & Matrix Registry
 # ==============================================================================
 APP_CONFIG <- list(
   data_dir       = "data/rds/",
   limit_mld      = 10,
   threshold_kg   = 1.0,
   theme_primary  = "#2c3e50",
-  days_per_year  = 365,
-  ml_to_l        = 1e6,
+  ml_to_l        = 1e6,     
+  m3_to_l        = 1000,
+  t_to_g         = 1e6,     
+  kg_to_g        = 1000,
   ng_to_kg       = 1e-12,
-  zero_tol       = 1e-9   # Tolerance for filtering empty mass rows
+  zero_tol       = 1e-9   
 )
 
+# Reference table mapping facility profiles to ECCC table columns
+MATRIX_REGISTRY <- data.frame(
+  treat = c(rep("Primary", 4), rep("Secondary", 5), rep("Tertiary / Advanced", 2)),
+  mix = c("< 90%", "> 90%", "> 90%", "> 90%", "< 70%", "70% - 90%", "> 90%", "> 90%", "< 70%", "< 90%", "> 90%"),
+  solids = c("Dewatering", "Dewatering", "Alkaline Treatment", "Anaerobic Digestion", "Anaerobic Digestion", "Anaerobic Digestion", "Anaerobic Digestion", "Dewatering", "Anaerobic Digestion & Pelletization", "Dewatering", "Dewatering"),
+  col_liq = c("primary_treatment_with_lt_90_pct_residential_sources_ng_l", "primary_treatment_with_gt_90_pct_residential_sources_ng_l", "primary_treatment_with_gt_90_pct_residential_sources_ng_l", "primary_treatment_with_gt_90_pct_residential_sources_ng_l", "secondary_treatment_with_lt_70_pct_residential_sources_ng_l", "secondary_treatment_with_70_pct_90_pct_residential_sources_ng_l", "secondary_treatment_with_gt_90_pct_residential_sources_ng_l", "secondary_treatment_with_gt_90_pct_residential_sources_ng_l", "secondary_treatment_with_lt_70_pct_residential_sources_ng_l", "tertiary_advanced_treatment_with_lt_90_pct_residential_sources_ng_l", "tertiary_advanced_treatment_with_gt_90_pct_residential_sources_ng_l"),
+  col_sol = c("primary_treatment_with_dewatering_of_solids_lt_90_pct_residential_sources_ng_g_dry_weight_basis", "primary_treatment_with_dewatering_of_solids_gt_90_pct_residential_sources_ng_g_dry_weight_basis", "primary_treatment_with_alkaline_solids_treatment_gt_90_pct_residential_sources_ng_g_dry_weight_basis_5", "primary_treatment_with_anerobic_digestion_of_solids_gt_90_pct_residential_sources_ng_g_dry_weight_basis", "secondary_treatment_with_anerobic_digestion_of_solids_lt_70_pct_residential_sources_ng_g_dry_weight_basis", "secondary_treatment_with_anerobic_digestion_of_solids_70_pct_90_pct_residential_sources_ng_g_dry_weight_basis", "secondary_treatment_with_anerobic_digestion_of_solids_gt_90_pct_residential_sources_ng_g_dry_weight_basis", "secondary_treatment_with_dewatering_of_solids_gt_90_pct_residential_sources_ng_g_dry_weight_basis", "secondary_treatment_with_anerobic_digestion_and_pelletization_of_solids_lt_70_pct_residential_sources_ng_g_dry_weight_basis", "tertiary_treatment_with_dewatering_of_solids_lt_90_pct_residential_sources_ng_g_dry_weight_basis", "tertiary_treatment_with_dewatering_of_solids_gt_90_pct_residential_sources_ng_g_dry_weight_basis"),
+  label = c("Primary Treatment (<90% Res)", "Primary Treatment (>90% Res)", "Primary/Alkaline (>90% Res)", "Primary/Anaerobic (>90% Res)", "Secondary/Anaerobic (<70% Res)", "Secondary/Anaerobic (70-90% Res)", "Secondary/Anaerobic (>90% Res)", "Secondary/Dewatering (>90% Res)", "Secondary/Pelletization (<70% Res)", "Tertiary/Dewatering (<90% Res)", "Tertiary/Dewatering (>90% Res)"),
+  stringsAsFactors = FALSE
+)
+
+# Initial UI defaults
+INIT_TREAT  <- unique(MATRIX_REGISTRY$treat)[1]
+INIT_MIXES  <- unique(MATRIX_REGISTRY$mix[MATRIX_REGISTRY$treat == INIT_TREAT])
+INIT_SOLIDS <- unique(MATRIX_REGISTRY$solids[MATRIX_REGISTRY$treat == INIT_TREAT & MATRIX_REGISTRY$mix == INIT_MIXES[1]])
+
+
 # ==============================================================================
-# 1. GLOBAL HELPERS & TAXONOMY
+# Core Functions & Data Processing
 # ==============================================================================
 
-# EPA 1633 Anion-to-Acid Crosswalk Dictionary
-PFAS_CROSSWALK <- tibble::tribble(
-  ~lab_cas,      ~npri_cas,   ~mw_salt, ~mw_acid, ~npri_substance_name,
-  "2795-39-3",   "1763-23-1", 538.22,   500.13,   "Perfluorooctane sulfonate (PFOS)",
-  "3825-26-1",   "335-67-1",  431.10,   414.07,   "Perfluorooctanoic acid (PFOA)",
-  "335-95-5",    "335-67-1",  436.06,   414.07,   "Perfluorooctanoic acid (PFOA)",
-  "6014-75-1",   "335-67-1",  453.06,   414.07,   "Perfluorooctanoic acid (PFOA)",
-  "29081-56-9",  "375-73-5",  338.19,   300.10,   "Perfluorobutane sulfonic acid (PFBS)",
-  "3871-99-6",   "355-46-4",  438.20,   400.11,   "Perfluorohexane sulfonic acid (PFHxS)"
-) |>
-  mutate(conversion_factor = mw_acid / mw_salt)
-
-# --- Pure Functions ---
-
-fmt_sigfigs <- \(v, sig_figs) {
-  if(is.na(v) || v == 0) return("0")
+# Formats numeric values to a specified number of significant figures
+fmt_sigfigs <- function(v, sig_figs) {
+  if (is.na(v) || v == 0) return("0")
   sub("\\.$", "", formatC(signif(v, sig_figs), digits = sig_figs, format = "fg", flag = "#"))
 }
 
-clean_pfas <- \(df) {
-  df <- df |> clean_names()
-  if ("pfas" %in% names(df)) df <- df |> rename(substance_name = pfas)
-  if ("substance" %in% names(df)) df <- df |> rename(substance_name = substance)
-  if ("cas" %in% names(df)) df <- df |> rename(cas_rn = cas)
+# Standardizes column names and applies the ND/2 protocol for non-detect strings
+clean_pfas <- function(df) {
+  names(df) <- tolower(gsub("[^[:alnum:]_]", "_", names(df)))
+  
+  if ("pfas" %in% names(df))      names(df)[names(df) == "pfas"] <- "substance_name"
+  if ("substance" %in% names(df)) names(df)[names(df) == "substance"] <- "substance_name"
+  if ("cas" %in% names(df))       names(df)[names(df) == "cas"] <- "cas_rn"
+  if ("cas_rn_s" %in% names(df))  names(df)[names(df) == "cas_rn_s"] <- "cas_rn"
   
   df |> 
-    mutate(
-      across(-any_of(c("substance_name", "cas_rn")), \(val) {
-        val_str <- as.character(val)
-        num_val <- suppressWarnings(parse_number(val_str))
-        if_else(str_starts(val_str, "<"), num_val / 2, num_val)
+    dplyr::mutate(
+      dplyr::across(-dplyr::any_of(c("substance_name", "cas_rn")), \(val) {
+        val_str <- trimws(toupper(as.character(val)))
+        
+        # Categorize input types
+        is_pure_nd <- !is.na(val_str) & (val_str %in% c("ND", "N/D", "NON-DETECT", "NA"))
+        is_lt_nd   <- !is.na(val_str) & startsWith(val_str, "<")
+        num_val    <- suppressWarnings(as.numeric(gsub("[^0-9.]", "", val_str)))
+        
+        # Apply ND/2 transformation logic
+        dplyr::case_when(
+          is_pure_nd ~ 0,
+          is_lt_nd   ~ num_val / 2,
+          TRUE       ~ num_val
+        )
       }),
-      across(any_of(c("substance_name", "cas_rn")), \(val) str_trim(as.character(val)))
+      dplyr::across(dplyr::any_of(c("substance_name", "cas_rn")), \(val) trimws(as.character(val)))
     )
 }
 
-find_col <- \(df, keywords) {
-  valid_keys <- keywords |> discard(\(key) key == "")
-  names(df) |> detect(\(col) all(str_detect(col, paste0("(^|_)", valid_keys, "($|_)"))))
-}
-
-calc_stream <- \(df, scenario, treat, mix, volume, type) {
-  if (is.null(df) || nrow(df) == 0) return(tibble(cas_rn = character(), mass_kg = numeric()))
+# Loads static RDS files and resolves relative paths for WebR environments
+load_app_data <- function() {
+  possible_paths <- c(APP_CONFIG$data_dir, paste0("/", APP_CONFIG$data_dir), "./data/rds/", "data/rds/")
+  dir_path <- Find(dir.exists, possible_paths)
   
-  if (scenario == "s3") {
-    keywords <- "median"
-  } else {
-    p1 <- str_to_lower(str_extract(treat, "^\\w+"))
-    p3 <- case_when(mix == "< 90%" ~ "lt_90", mix == "> 90%" ~ "gt_90", mix == "< 70%" ~ "lt_70", .default = "70_pct_90")
-    keywords <- c(p1, p3) 
+  if (is.null(dir_path)) {
+    return(list(
+      status = "Missing Data Directory", 
+      targets = data.frame(substance_name=character(), cas_rn=character(), stringsAsFactors=FALSE), 
+      eff_spec = data.frame(), 
+      bio_spec = data.frame(),
+      scrape_date = "N/A"
+    ))
   }
   
-  target_col <- find_col(df, keywords)
+  # File mtimes are often reset to the Unix epoch in virtual filesystems. 
+  # This tryCatch prevents NA errors during date formatting.
+  raw_time <- tryCatch({
+    mtime <- file.info(file.path(dir_path, "Table_1.rds"))$mtime
+    if (is.na(mtime) || as.numeric(format(mtime, "%Y")) < 2024) {
+      "Current ECCC Baseline" 
+    } else {
+      format(as.Date(mtime), "%B %d, %Y")
+    }
+  }, error = function(e) "Current ECCC Baseline")
   
-  if (is.null(target_col)) {
-    warning(sprintf("calc_stream: Target column not found for keywords '%s'", paste(keywords, collapse = ", ")))
-    return(tibble(cas_rn = character(), mass_kg = numeric()))
-  }
-  
-  mult <- if_else(type == "liq", APP_CONFIG$days_per_year, 1)
-  
-  df |> 
-    select(cas_rn, conc = all_of(target_col)) |>
-    mutate(mass_kg = (volume * APP_CONFIG$ml_to_l * mult * conc) * APP_CONFIG$ng_to_kg) |>
-    select(cas_rn, mass_kg)
-}
-
-load_app_data <- \() {
-  dir_path <- APP_CONFIG$data_dir
-  if (!dir.exists(dir_path)) return(list(status = "Missing", targets = tibble()))
-  
-  raw_time <- file.info(file.path(dir_path, "Table_1.rds"))$mtime
   list(
-    targets  = read_rds(file.path(dir_path, "Table_1.rds")) |> clean_pfas(),
-    eff_spec = read_rds(file.path(dir_path, "Table_7.rds")) |> clean_pfas(),
-    bio_spec = read_rds(file.path(dir_path, "Table_8.rds")) |> clean_pfas(),
-    eff_gen  = read_rds(file.path(dir_path, "Table_9.rds")) |> clean_pfas(),
-    bio_gen  = read_rds(file.path(dir_path, "Table_10.rds")) |> clean_pfas(),
-    scrape_date = format(as.Date(raw_time), "%B %d, %Y"),
-    status = "Loaded"
+    targets     = clean_pfas(readRDS(file.path(dir_path, "Table_1.rds"))),
+    eff_spec    = clean_pfas(readRDS(file.path(dir_path, "Table_7.rds"))),
+    bio_spec    = clean_pfas(readRDS(file.path(dir_path, "Table_8.rds"))),
+    scrape_date = raw_time,
+    status      = "Loaded"
   )
 }
 
+# Executes mass balance calculations for a given waste stream (liquid or solid)
+calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
+  
+  # Helper to return a padded dataframe when calculation criteria are unmet
+  safe_return <- function(msg, col_status = "ERR") {
+    base_df |> 
+      dplyr::select(cas_rn) |> 
+      dplyr::mutate(
+        conc         = NA_real_, 
+        mass_kg      = 0, 
+        res_col      = col_status,
+        trace_vol    = NA_real_, 
+        trace_unit   = NA_character_, 
+        trace_conc   = NA_real_, 
+        trace_source = NA_character_, 
+        trace_err    = msg
+      )
+  }
+  
+  if (!is.data.frame(reg_row) || nrow(reg_row) == 0) return(safe_return("Invalid registry configuration."))
+  if (is.null(target_df) || nrow(target_df) == 0) return(safe_return("Source matrix missing.", "N/A"))
+  
+  target_col  <- if(type == "liq") reg_row[["col_liq"]] else reg_row[["col_sol"]]
+  audit_label <- reg_row[["label"]]
+  
+  if (is.null(target_col) || !(target_col %in% names(target_df))) {
+    return(safe_return("Matrix column unavailable.", "N/A"))
+  }
+  
+  safe_vol <- dplyr::if_else(is.na(volume), 0, volume)
+  unit_conv <- if(type == "liq") {
+    if(unit == "ML/y") APP_CONFIG$ml_to_l else APP_CONFIG$m3_to_l 
+  } else {
+    if(unit == "t/y") APP_CONFIG$t_to_g else APP_CONFIG$kg_to_g 
+  }
+  
+  target_df |> 
+    dplyr::select(cas_rn, conc = dplyr::all_of(target_col)) |>
+    dplyr::mutate(
+      mass_kg      = dplyr::if_else(is.na(conc), 0, (safe_vol * unit_conv * conc) * APP_CONFIG$ng_to_kg),
+      res_col      = target_col,
+      trace_vol    = safe_vol,
+      trace_unit   = unit,
+      trace_conc   = conc,
+      trace_source = audit_label,
+      trace_err    = NA_character_
+    )
+}
+
+# ------------------------------------------------------------------------------
+# UI Component Builders
+# ------------------------------------------------------------------------------
+
+lbl_with_tt <- function(icon_name, text, tt_text) {
+  tags$div(
+    class="d-flex align-items-center gap-1 mb-1 mt-2",
+    tags$label(HTML(paste(bs_icon(icon_name, class="me-1 text-primary"), text)), class = "fw-semibold mb-0 d-block small"),
+    tooltip(bs_icon("info-circle", class="text-muted opacity-75", size="0.8rem"), tt_text)
+  )
+}
+
+dense_metric_card <- function(title, value, subtext, icon_name, bg_class) {
+  tags$div(
+    class = sprintf("d-flex align-items-center p-3 rounded shadow-sm text-white h-100 %s bg-gradient", bg_class),
+    tags$div(class = "me-3 ms-1 opacity-75", bs_icon(icon_name, size = "2rem")),
+    tags$div(
+      class = "d-flex flex-column justify-content-center",
+      tags$span(class = "text-uppercase fw-bold text-white-50 small lh-1 mb-1", title),
+      tags$span(class = "fs-4 fw-bold lh-1 mb-1", value),
+      tags$span(class = "text-white-50 text-truncate small lh-1", subtext)
+    )
+  )
+}
+
+# Pre-load data to make `app_data` available to UI components at startup
 app_data <- load_app_data()
 
+
 # ==============================================================================
-# 2. UI COMPONENTS
+# UI Modules
 # ==============================================================================
 
-ui_sidebar <- \() {
+mod_sidebar_ui <- function(id) {
+  ns <- NS(id)
   sidebar(
-    width = 330,
-    bg = "#f8f9fa", 
-    
-    title = tags$div(
-      class = "py-2 border-bottom mb-2 d-flex align-items-center gap-2",
-      bs_icon("sliders", class = "fs-5 text-primary"), 
-      tags$h6("Engine Parameters", class = "mb-0 fw-bold")
-    ),
-    
-    # --- SECTION 1: REPORTING PATHWAY ---
-    tags$div(
-      class = "d-flex align-items-center gap-2 mt-2 mb-2 px-1",
-      bs_icon("diagram-3", class = "text-primary"),
-      tags$span(class = "fw-bold", "Reporting Pathway")
-    ),
-    
-    tags$div(
-      class = "bg-white p-2 rounded border shadow-sm mb-2",
-      checkboxGroupInput("active_streams", tags$span(bs_icon("droplet-half", class="me-2 text-info"), "Active Streams:"), choices = list("Effluent" = "liq", "Biosolids" = "sol"), selected = c("liq", "sol"), inline = TRUE)
-    ),
-    
-    tags$div(
-      class = "bg-white p-2 rounded border shadow-sm mb-2", 
-      input_switch("lab_toggle", tags$span(bs_icon("clipboard-data", class="me-2 text-info"), "Lab Data Available? ", tags$span("(Scenario 1)", class = "text-muted small text-nowrap")), value = FALSE),
+    width = 360, padding = "1rem", bg = "#f8f9fa", resizable = FALSE, collapse = FALSE,
+    accordion(
+      id = ns("sidebar_wizard"), multiple = TRUE, open = c(ns("step1"), ns("step2"), ns("step3")),
       
-      conditionalPanel(
-        condition = "!input.lab_toggle",
-        tags$div(class = "mt-2 pt-2 border-top",
-                 selectInput("scenario", tags$span(bs_icon("calculator", class="me-2"), "Fall-back Scenario:"), choices = list("Scenario 2: Profile Baseline" = "s2", "Scenario 3: National Average" = "s3"))
-        )
+      # 1. Reporting Scope
+      accordion_panel(
+        title = tags$span(class="fw-bold text-primary small text-uppercase", "1. Reporting Scope"),
+        value = ns("step1"), icon = bs_icon("diagram-3", class="text-primary"),
+        lbl_with_tt("pin-map", "Facility Name", "Enter the site name for export documentation."),
+        textInput(ns("site_name"), NULL, "e.g., North End WWTP", width = "100%"),
+        lbl_with_tt("database", "Data Source", "Select ECCC modeled estimates or site-specific lab data."),
+        radioGroupButtons(ns("data_source"), NULL, choices = c("ECCC Estimates" = "eccc", "Custom Lab Data" = "lab"), selected = "eccc", justified = TRUE, status = "outline-primary", size = "sm"),
+        uiOutput(ns("data_source_help")),
+        lbl_with_tt("signpost-split", "Active Pathways", "Toggle the waste streams applicable to this facility."),
+        checkboxGroupButtons(ns("active_streams"), NULL, choices = c("Effluent" = "liq", "Biosolids" = "sol"), selected = c("liq", "sol"), justified = TRUE, status = "outline-primary", size = "sm")
       ),
-      conditionalPanel(
-        condition = "input.lab_toggle",
-        tags$div(class = "mt-2 pt-2 border-top",
-                 fileInput("user_csv", tags$span(bs_icon("file-earmark-spreadsheet", class="me-2"), "Upload Lab Data (.csv)"), accept = ".csv", buttonLabel = bs_icon("upload")),
-                 radioButtons("lab_acid_eq", tooltip(tags$span(bs_icon("info-circle", class="me-1"), "Is Acid Equivalent? "), "EPA 1633 reports anions. If 'No', the engine automatically converts these to parent acid mass equivalents."), choices = c("Yes", "No"), selected = "No", inline = TRUE)
-        )
-      )
-    ),
-    
-    # --- SECTION 2: FACILITY PROFILE ---
-    # [UX Polish]: Added border-top, pt-3, and mt-3 for clean visual delineation
-    tags$div(
-      class = "d-flex align-items-center gap-2 mt-3 mb-2 px-1 border-top pt-3",
-      bs_icon("building", class = "text-primary"),
-      tags$span(class = "fw-bold", "Facility Profile")
-    ),
-    
-    tags$div(
-      class = "bg-white p-2 rounded border shadow-sm",
-      layout_columns(
-        col_widths = breakpoints(sm = 12, md = 6),
-        numericInput("flow_mld", tags$span(bs_icon("droplet", class="me-1 text-primary"), "Flow (ML/d)"), value = 5, min = 0),
-        numericInput("dry_tonnes", tags$span(bs_icon("box-seam", class="me-1 text-primary"), "Solids (t/y)"), value = 5, min = 0)
+      
+      # 2. Facility Profile
+      accordion_panel(
+        title = tags$span(class="fw-bold text-primary small text-uppercase", "2. Facility Profile"),
+        value = ns("step2"), icon = bs_icon("building-gear", class="text-primary"),
+        lbl_with_tt("funnel", "Treatment Tier", "The highest level of liquid treatment achieved by the facility."),
+        pickerInput(ns("treat"), NULL, choices = unique(MATRIX_REGISTRY$treat), selected = INIT_TREAT, width = "100%"),
+        lbl_with_tt("people", "Influent Mix", "The percentage of influent originating from residential sources."),
+        radioGroupButtons(ns("res_mix"), NULL, choices = INIT_MIXES, selected = INIT_MIXES[1], justified = TRUE, size = "sm", status = "outline-primary"),
+        lbl_with_tt("layer-forward", "Solids Processing", "The primary method used to process sludge and biosolids."),
+        pickerInput(ns("solids_process"), NULL, choices = INIT_SOLIDS, selected = INIT_SOLIDS[1], width = "100%")
       ),
-      layout_columns(
-        col_widths = breakpoints(sm = 12, md = 6),
-        selectInput("treat", tags$span(bs_icon("funnel", class="me-2 text-primary"), "Treatment:"), choices = list("Primary", "Secondary", "Tertiary / Advanced")),
-        uiOutput("res_mix_ui") 
-      )
-    ),
-    
-    tags$div(class = "mt-auto text-center small text-muted pt-3", str_glue("Source: ECCC PFAS Guidance 2026"), tags$br(), tags$span(str_glue("Updated: {coalesce(app_data$scrape_date, 'N/A')}"), class = "opacity-75"))
-  )
-}
-
-ui_main_tabs <- \() {
-  navset_card_underline(
-    nav_panel(
-      title = "Mass Balance Table", icon = bs_icon("table"), 
-      card(
-        full_screen = TRUE,
-        card_header(
-          class = "bg-light d-flex align-items-center justify-content-between gap-3 flex-wrap py-2",
-          tags$div(
-            class = "d-flex align-items-center mb-0",
-            style = "flex: 1; min-width: 250px; max-width: 450px;",
-            tags$div(class = "w-100", style = "margin-bottom: -15px;", 
-                     selectizeInput("cas_filter", NULL, choices = NULL, multiple = TRUE, options = list(placeholder = 'Search CAS RN...'), width = "100%")
-            )
-          ),
-          tags$div(
-            class = "d-flex align-items-center gap-4 flex-wrap",
-            tags$div(
-              class = "d-flex align-items-center gap-2",
-              tooltip(tags$span("Sig Figs ", bs_icon("info-circle"), class = "text-muted small"), "Adjust precision. Trailing zeros are preserved for scientific reporting."),
-              tags$div(style = "margin-bottom: -15px;", numericInput("sig_figs", NULL, value = 2, min = 1, max = 8, width = "80px"))
-            ),
-            # [UX Polish]: Wrapped checkbox in flex container with pt-1 to align baselines
-            tags$div(
-              class = "d-flex align-items-center pt-1", style = "margin-bottom: -15px;", 
-              checkboxInput("hide_zero", "Hide zero mass", value = TRUE)
-            ),
-            downloadButton("export_data", "Export CSV", class = "btn-outline-primary btn-sm")
+      
+      # 3. Annual Volumes
+      accordion_panel(
+        title = tags$span(class="fw-bold text-primary small text-uppercase", "3. Annual Volumes"),
+        value = ns("step3"), icon = bs_icon("speedometer", class="text-primary"),
+        
+        conditionalPanel(
+          condition = sprintf("input['%s'] && input['%s'].indexOf('liq') > -1", ns("active_streams"), ns("active_streams")),
+          lbl_with_tt("droplet", "Effluent Discharge", "Total liquid volume discharged per year."),
+          layout_columns(
+            col_widths = c(8, 4), gap = "0.5rem", 
+            numericInput(ns("flow_val"), NULL, value = 1825, min = 0, width = "100%"), 
+            radioGroupButtons(ns("flow_unit"), NULL, choices = c("ML/y", "m³/y"), selected = "ML/y", size = "sm", status = "outline-primary")
           )
         ),
-        card_body(padding = 0, reactableOutput("main_table"))
-      )
-    ),
-    
-    # --- 2. METHODOLOGY SUMMARY ---
-    nav_panel(
-      title = "Methodology Summary", icon = bs_icon("info-square"),
-      card(
-        card_header(
-          class = "bg-light d-flex align-items-center gap-2",
-          bs_icon("book-half"), tags$h5("Compliance Calculation Methodology", class = "mb-0")
-        ),
-        card_body(
-          class = "p-4",
-          tags$h6("1. Regulatory & Facility Thresholds", class="fw-bold text-primary mt-2"),
-          tags$blockquote(class="border-start border-4 border-primary ps-3 mb-4 bg-light p-3 rounded",
-                          tags$div(class="mb-2", 
-                                   tags$strong("Mass Threshold (Aggregate):"), 
-                                   " Reporting is mandatory if the total combined mass of all PFAS in this group is ", 
-                                   tags$span(class="badge bg-danger fs-6", HTML(str_glue("&ge; {APP_CONFIG$threshold_kg} kg/year"))), "."
-                          ),
-                          tags$div(class="mb-2 text-muted small ps-3",
-                                   tags$em("Note: Under ECCC NPRI Part 1C, if this aggregate threshold is met, "),
-                                   tags$strong("all"), 
-                                   tags$em(" individual PFAS within the group must be reported, regardless of their individual mass.")
-                          ),
-                          tags$div(
-                            tags$strong("Facility Threshold:"), 
-                            " WWTPs with an annual average discharge of ", 
-                            tags$span(class="badge bg-secondary fs-6", HTML(str_glue("&lt; {APP_CONFIG$limit_mld} ML/day"))), 
-                            " are entirely exempt."
-                          )
-          ),
-          
-          tags$h6("2. The 0.1% Concentration Rule & By-products", class="fw-bold text-primary mt-4"),
-          tags$p(class="mb-4", HTML("Typically, PFAS reporting only applies to substances present at concentrations &ge; 0.1%. <strong>However</strong>, for wastewater treatment plants where PFAS is a <em>by-product</em>, the 0.1% threshold <strong>does not apply</strong>. This engine aggregates all trace mass regardless of concentration.")),
-          
-          tags$h6("3. Handling Non-Detects", class="fw-bold text-primary mt-4"),
-          tags$p(class="mb-4", HTML("Following official guidance, when a substance is tested for but not detected (indicated by a <code>&lt;</code> symbol), the <strong>half-detection method</strong> is strictly applied. For example, a lab result of <code>&lt; 4.0</code> is calculated into the mass balance as <code>2.0</code>.")),
-          
-          tags$h6("4. Estimation Scenarios", class="fw-bold text-primary mt-4"),
-          layout_column_wrap(
-            width = "280px", gap = "1rem", class = "mb-4",
-            card(class = "bg-light border-0 shadow-sm", card_body(tags$strong("Scenario 1: Site-Specific"), tags$br(), "Uses your facility's actual analytical laboratory data (e.g., EPA 1633). Highly recommended for accuracy.")),
-            card(class = "bg-light border-0 shadow-sm", card_body(tags$strong("Scenario 2: Profile Baseline"), tags$br(), "Estimates mass using ECCC matrices matched exactly to your plant's treatment tier and residential mix.")),
-            card(class = "bg-light border-0 shadow-sm", card_body(tags$strong("Scenario 3: National Average"), tags$br(), "Estimates mass based strictly on the national median concentrations for all Canadian WWTPs."))
-          ),
-          
-          tags$h6("5. Acid Equivalent Conversion (The Anion Rule)", class="fw-bold text-primary mt-4"),
-          tags$p(class="mb-2", HTML("NPRI requires all salts and anions be reported as an <strong>equivalent weight of the parent acid</strong>. If lab data is uploaded as anions, this engine applies the following formula automatically:")),
-          tags$pre(class="bg-dark text-white p-3 rounded", HTML("Equivalent Acid Mass = Lab Mass &times; (MW Acid / MW Salt)"))
-        )
-      )
-    ),
-    
-    nav_panel(
-      title = "Data Diagnostics", icon = bs_icon("bug"),
-      card(
-        card_header("Background Data Integrity Audit", class = "bg-light"),
-        card_body(uiOutput("diagnostic_ui"))
-      )
-    )
-  )
-}
-
-# --- UI ASSEMBLY ---
-ui <- page_sidebar(
-  title = "NPRI PFAS Compliance Engine",
-  theme = bs_theme(bootswatch = "flatly", primary = APP_CONFIG$theme_primary, "font-size-base" = "0.85rem"),
-  sidebar = ui_sidebar(),
-  uiOutput("top_ribbon"),
-  ui_main_tabs()
-)
-
-# ==============================================================================
-# 3. SERVER LOGIC
-# ==============================================================================
-server <- \(input, output, session) {
-  
-  observe({
-    updateSelectizeInput(session, "cas_filter", choices = sort(unique(app_data$targets$cas_rn)), server = TRUE)
-  })
-  
-  output$res_mix_ui <- renderUI({
-    req(input$treat)
-    choices <- switch(input$treat, "Primary" = c("< 90%", "> 90%"), "Secondary" = c("< 70%", "70% - 90%", "> 90%"), "Tertiary / Advanced" = c("< 90%", "> 90%"))
-    selectInput("res_mix", HTML(paste(bs_icon("people", class="me-2 text-primary"), "Flow Mix:")), choices = choices)
-  })
-  
-  user_lab_data <- reactive({
-    req(input$lab_toggle, input$user_csv)
-    lab_raw <- tryCatch(read_csv(input$user_csv$datapath, show_col_types = FALSE) |> clean_pfas(), error = \(e) NULL)
-    
-    validate(
-      need(!is.null(lab_raw), "Invalid or unreadable CSV file."), 
-      need(any(str_detect(names(lab_raw), "cas")), "Uploaded CSV must contain a 'CAS' column."), 
-      need(any(str_detect(names(lab_raw), "conc")), "Uploaded CSV must contain a 'Conc' column.")
-    )
-    
-    cas_col <- names(lab_raw) |> detect(\(col) str_detect(col, "cas"))
-    conc_col <- names(lab_raw) |> keep(\(col) str_detect(col, "conc")) |> _[[1]]
-    
-    clean_df <- lab_raw |> 
-      mutate(cas_rn = .data[[cas_col]], val = .data[[conc_col]]) |> 
-      select(cas_rn, val)
-    
-    if (input$lab_acid_eq == "No") {
-      clean_df <- clean_df |> 
-        left_join(PFAS_CROSSWALK, by = c("cas_rn" = "lab_cas")) |>
-        mutate(cas_rn = coalesce(npri_cas, cas_rn), val = val * coalesce(conversion_factor, 1)) |>
-        group_by(cas_rn) |> 
-        summarise(val = sum(val, na.rm = TRUE), .groups = "drop")
-    }
-    return(clean_df)
-  })
-  
-  base_data <- reactive({
-    req(input$treat, input$res_mix) 
-    
-    scen <- if(input$lab_toggle) "s1" else input$scenario
-    eff_df <- if(scen == "s3") app_data$eff_gen else app_data$eff_spec
-    bio_df <- if(scen == "s3") app_data$bio_gen else app_data$bio_spec
-    
-    liq <- if("liq" %in% input$active_streams) calc_stream(eff_df, scen, input$treat, input$res_mix, input$flow_mld, "liq") else tibble(cas_rn = character(), mass_kg = numeric())
-    sol <- if("sol" %in% input$active_streams) calc_stream(bio_df, scen, input$treat, input$res_mix, input$dry_tonnes, "sol") else tibble(cas_rn = character(), mass_kg = numeric())
-    
-    app_data$targets |> 
-      select(substance_name, cas_rn) |>
-      left_join(liq |> rename(mass_liq = mass_kg), by = "cas_rn") |>
-      left_join(sol |> rename(mass_sol = mass_kg), by = "cas_rn") |>
-      mutate(
-        across(starts_with("mass"), \(x) coalesce(x, 0)), 
-        aggregate_kg = mass_liq + mass_sol
-      )
-  })
-  
-  final_display_data <- reactive({
-    df <- base_data()
-    if(input$lab_toggle) {
-      lab <- user_lab_data()
-      if(!is.null(lab)) {
-        df <- df |> left_join(lab |> rename(lab_val = val), by = "cas_rn") |>
-          mutate(
-            mass_liq = if_else(!is.na(lab_val), (input$flow_mld * APP_CONFIG$ml_to_l * APP_CONFIG$days_per_year * lab_val) * APP_CONFIG$ng_to_kg, mass_liq), 
-            aggregate_kg = mass_liq + mass_sol
-          ) |>
-          select(-lab_val)
-      }
-    }
-    if(!is.null(input$cas_filter)) df <- df |> filter(cas_rn %in% input$cas_filter)
-    if(isTRUE(input$hide_zero)) df <- df |> filter(aggregate_kg > APP_CONFIG$zero_tol)
-    return(df)
-  })
-  
-  output$top_ribbon <- renderUI({
-    df <- final_display_data()
-    
-    total_val <- sum(df$aggregate_kg, na.rm = TRUE)
-    is_danger <- isTRUE(total_val >= APP_CONFIG$threshold_kg)
-    is_mandatory <- isTRUE(input$flow_mld >= APP_CONFIG$limit_mld)
-    
-    total_tracked <- nrow(df)
-    
-    # [UX Polish]: Logically correct compliance escalation text
-    if(is_danger) {
-      reportable_count <- total_tracked
-      reportable_text <- "All Tracked Reportable"
-      reportable_class <- "danger"
-    } else {
-      reportable_count <- sum(df$aggregate_kg >= APP_CONFIG$threshold_kg, na.rm = TRUE)
-      reportable_text <- str_glue("{reportable_count} Over Limit")
-      reportable_class <- if(reportable_count > 0) "danger" else "success"
-    }
-    
-    path_text <- if(input$lab_toggle) "Scenario 1: Site Lab Data" else switch(input$scenario, "s2" = "Scenario 2: Profile Baseline", "s3" = "Scenario 3: National Average")
-    
-    card(
-      class = "mb-3 border-0 shadow-sm rounded-3",
-      style = "background-color: #f8f9fa;",
-      card_body(
-        class = "py-3 px-4",
-        layout_columns(
-          col_widths = breakpoints(sm = 12, lg = 6, xl = 3),
-          gap = "2rem",
-          
+        
+        conditionalPanel(
+          condition = sprintf("input['%s'] && input['%s'].indexOf('sol') > -1", ns("active_streams"), ns("active_streams")),
           tags$div(
-            class = "d-flex gap-3 flex-grow-1 align-items-center",
-            bs_icon("speedometer2", class = "fs-1 text-primary opacity-75"),
-            tags$div(
-              class = "w-100", 
-              tags$div(
-                tags$h6("AGGREGATE PFAS MASS", class = "text-muted small fw-bold mb-1", style = "letter-spacing: 0.5px;"),
-                tags$div(
-                  class = "d-flex align-items-baseline gap-2 mb-2",
-                  # [UX Polish]: Added text-nowrap to prevent massive kg numbers from splitting onto two lines
-                  tags$span(str_glue("{formatC(total_val, format = 'f', digits = 2, big.mark = ',')} kg"), class = "fs-4 fw-bold text-dark text-nowrap"),
-                  tags$span(path_text, class = "small text-muted text-nowrap")
-                )
-              ),
-              tags$div(
-                class = "progress rounded-pill bg-light", style = "height: 6px;",
-                tags$div(
-                  class = str_glue("progress-bar {if(is_danger) 'bg-danger' else 'bg-success'}"), 
-                  role = "progressbar", 
-                  style = str_glue("width: {min(100, (total_val / APP_CONFIG$threshold_kg) * 100)}%")
-                )
-              )
-            )
-          ),
-          
-          tags$div(
-            class = "d-flex align-items-center gap-3 border-start ps-3",
-            bs_icon(if(is_danger) "exclamation-triangle-fill" else "check-circle-fill", class = str_glue("fs-1 text-{if(is_danger) 'danger' else 'success'} opacity-75")),
-            tags$div(
-              tags$h6("THRESHOLD STATUS", class = "text-muted small fw-bold mb-1", style = "letter-spacing: 0.5px;"),
-              tags$div(
-                class = "d-flex align-items-baseline gap-2",
-                tags$span(if(is_danger) "REPORTABLE" else "BELOW LIMIT", class = str_glue("fs-5 fw-bold text-{if(is_danger) 'danger' else 'success'}")),
-                tags$span(if(is_danger) str_glue(">= {APP_CONFIG$threshold_kg} kg/y") else "Under limit", class = "small text-muted text-nowrap")
-              )
-            )
-          ),
-          
-          tags$div(
-            class = "d-flex align-items-center gap-3 border-start ps-3",
-            bs_icon("building", class = str_glue("fs-1 text-{if(is_mandatory) 'primary' else 'secondary'} opacity-75")),
-            tags$div(
-              tags$h6("FACILITY STATUS", class = "text-muted small fw-bold mb-1", style = "letter-spacing: 0.5px;"),
-              tags$div(
-                class = "d-flex align-items-baseline gap-2",
-                tags$span(if(is_mandatory) "MANDATORY" else "EXEMPT", class = str_glue("fs-5 fw-bold text-{if(is_mandatory) 'primary' else 'secondary'}")),
-                tags$span(str_glue("Ref: {APP_CONFIG$limit_mld} ML/d Limit"), class = "small text-muted text-nowrap")
-              )
-            )
-          ),
-          
-          tags$div(
-            class = "d-flex align-items-center gap-3 border-start ps-3",
-            bs_icon("list-check", class = "fs-1 text-info opacity-75"),
-            tags$div(
-              tags$h6("SUBSTANCE COVERAGE", class = "text-muted small fw-bold mb-1", style = "letter-spacing: 0.5px;"),
-              tags$div(
-                class = "d-flex align-items-baseline gap-2",
-                tags$span(str_glue("{total_tracked} Tracked"), class = "fs-6 fw-bold text-dark text-nowrap"),
-                tags$span("|", class = "text-muted opacity-50"),
-                tags$span(reportable_text, class = str_glue("fs-6 fw-bold text-{reportable_class} text-nowrap"))
-              )
+            class = "mt-2", 
+            lbl_with_tt("box-seam", "Biosolids Production", "Total dry weight of biosolids generated per year."),
+            layout_columns(
+              col_widths = c(8, 4), gap = "0.5rem", 
+              numericInput(ns("dry_tonnes"), NULL, value = 50, min = 0, width = "100%"), 
+              radioGroupButtons(ns("solids_unit"), NULL, choices = c("t/y", "kg/y"), selected = "t/y", size = "sm", status = "outline-primary")
             )
           )
+        ),
+        
+        conditionalPanel(
+          condition = sprintf("!input['%s'] || input['%s'].length == 0", ns("active_streams"), ns("active_streams")),
+          tags$div(class="text-muted small fst-italic text-center py-2", "Please select at least one active pathway in Section 1.")
         )
       )
-    )
-  })
-  
-  output$export_data <- downloadHandler(
-    filename = function() { paste("pfas-report-", Sys.Date(), ".csv", sep="") },
-    content = function(file) { write.csv(final_display_data(), file, row.names = FALSE) }
-  )
-  
-  output$main_table <- renderReactable({
-    req(input$sig_figs)
-    data <- final_display_data()
-    
-    reactable(
-      data, 
-      pagination = TRUE, 
-      highlight = TRUE, 
-      compact = TRUE,
-      defaultSorted = "aggregate_kg",
-      defaultSortOrder = "desc",
-      details = \(index) {
-        row <- data[index, ]
-        tags$div(class = "p-3 bg-light border rounded small",
-                 tags$h6("Compliance Audit Trail", class = "fw-bold text-primary mb-2"),
-                 tags$ul(class = "mb-0",
-                         tags$li(str_glue("Substance: {row$substance_name} (CAS: {row$cas_rn})")),
-                         tags$li(str_glue("Liquids Contribution: {fmt_sigfigs(row$mass_liq, input$sig_figs)} kg/y")),
-                         tags$li(str_glue("Solids Contribution: {fmt_sigfigs(row$mass_sol, input$sig_figs)} kg/y")),
-                         if(input$lab_toggle && input$lab_acid_eq == "No" && row$cas_rn %in% PFAS_CROSSWALK$npri_cas) 
-                           tags$li(tags$b("Audit:"), " Anion-to-Acid conversion applied.")
-                 )
-        )
-      },
-      theme = reactableTheme(headerStyle = list(backgroundColor = APP_CONFIG$theme_primary, color = "#fff")),
-      columns = list(
-        substance_name = colDef(name = "Substance", minWidth = 300),
-        cas_rn = colDef(name = "CAS RN", align = "center"),
-        mass_liq = colDef(name = "Liquids (kg/y)", align = "right", cell = \(v) fmt_sigfigs(v, input$sig_figs)),
-        mass_sol = colDef(name = "Solids (kg/y)", align = "right", cell = \(v) fmt_sigfigs(v, input$sig_figs)),
-        aggregate_kg = colDef(
-          name = "Total (kg/y)", align = "right",
-          style = \(v) {
-            bar_width <- min(100, (v / APP_CONFIG$threshold_kg) * 100)
-            is_over <- v >= APP_CONFIG$threshold_kg
-            bar_color <- if(is_over) "#f8d7da" else "#e2e3e5"
-            list(background = str_glue("linear-gradient(90deg, {bar_color} {bar_width}%, transparent {bar_width}%)"), fontWeight = "bold", color = if(is_over) "#842029" else "inherit")
-          },
-          cell = \(v) fmt_sigfigs(v, input$sig_figs),
-          header = function(v, n) htmltools::span(title = "Aggregate per-substance mass", "Total (kg/y) \u24D8")
-        )
-      )
-    )
-  })
-  
-  output$diagnostic_ui <- renderUI({
-    status_color <- if(app_data$status == "Loaded") "bg-success" else "bg-danger"
+    ),
     
     tags$div(
-      layout_columns(
-        col_widths = breakpoints(sm = 12, lg = 6),
-        tags$div(
-          class = "p-3 border rounded h-100",
-          tags$h6(bs_icon("hdd-network"), " System Metadata", class = "border-bottom pb-2"),
-          tags$table(
-            class = "table table-sm table-borderless mb-0",
-            tags$tbody(
-              tags$tr(tags$td(tags$strong("App Status:")), tags$td(tags$span(app_data$status, class = str_glue("badge {status_color}")))),
-              tags$tr(tags$td(tags$strong("Scrape Date:")), tags$td(coalesce(app_data$scrape_date, "N/A"))),
-              tags$tr(tags$td(tags$strong("Working Dir:")), tags$td(tags$code(getwd())))
-            )
-          )
-        ),
-        tags$div(
-          class = "p-3 border rounded h-100",
-          tags$h6(bs_icon("server"), " ECCC Data Integrity (Row Counts)", class = "border-bottom pb-2"),
-          tags$table(
-            class = "table table-sm table-borderless mb-0",
-            tags$tbody(
-              tags$tr(tags$td("Targets (Table 1):"), tags$td(tags$span(nrow(app_data$targets), class = "badge bg-secondary"))),
-              tags$tr(tags$td("Effluent Spec (Table 7):"), tags$td(tags$span(nrow(app_data$eff_spec), class = "badge bg-secondary"))),
-              tags$tr(tags$td("Biosolids Spec (Table 8):"), tags$td(tags$span(nrow(app_data$bio_spec), class = "badge bg-secondary")))
-            )
-          )
-        )
+      class = "mt-auto pt-3 border-top",
+      tags$div(
+        class = "d-grid gap-2 mb-2", 
+        actionButton(ns("export_csv"), "Generate NPRI Report", class = "btn-success w-100 fw-bold shadow-sm py-2", icon = icon("file-csv"))
       ),
       tags$div(
-        class = "p-3 border rounded mt-3",
-        tags$h6(bs_icon("activity"), " Active Data Flow Audit", class = "border-bottom pb-2"),
-        tags$p("Current Active Columns Rendered in Final Display:", class = "mb-1 small text-muted"),
-        tags$div(
-          class = "d-flex flex-wrap gap-2",
-          map(names(final_display_data()), \(col_name) tags$span(col_name, class = "badge bg-light text-dark border border-secondary"))
-        )
+        class = "text-center small text-muted", 
+        "Source: ECCC PFAS Guidance", tags$br(), 
+        tags$span(sprintf("Updated: %s", app_data$scrape_date), class = "opacity-75")
       )
     )
+  )
+}
+
+mod_dashboard_ui <- function(id) {
+  ns <- NS(id)
+  navset_card_underline(
+    
+    # Tab: Mass Balance (Data Table)
+    nav_panel(
+      "Mass Balance", icon = bs_icon("table"), 
+      card(
+        full_screen = TRUE, 
+        card_header(
+          class = "bg-light py-3 border-bottom-0 pe-5",
+          layout_columns(
+            col_widths = c(5, 7), class = "align-items-center mb-0",
+            tags$div(
+              class = "mb-0", 
+              selectizeInput(ns("cas_filter"), NULL, choices = NULL, multiple = TRUE, options = list(placeholder = 'Search CAS RN...'), width = "100%")
+            ),
+            tags$div(
+              class = "d-flex align-items-center justify-content-end gap-3",
+              checkboxInput(ns("hide_zero"), "Hide zero mass", value = TRUE),
+              tags$div(
+                class = "d-flex align-items-center gap-2", 
+                tooltip(tags$span("Sig Figs ", bs_icon("info-circle"), class = "text-muted small mb-0"), "Adjust precision."), 
+                tags$div(class = "mb-0", numericInput(ns("sig_figs"), NULL, value = 2, min = 1, max = 8, width = "80px"))
+              )
+            )
+          )
+        ),
+        card_body(padding = 0, reactableOutput(ns("main_table")))
+      )
+    ),
+    
+    # Tab: Methodology Documentation
+    nav_panel(
+      "Methodology", icon = bs_icon("journal-text"),
+      tags$div(
+        class = "p-4",
+        tags$div(class = "d-flex align-items-center gap-2 mb-4", bs_icon("book-half", size="1.5rem", class="text-primary"), tags$h4("Compliance Methodology", class = "mb-0 text-primary fw-bold")),
+        layout_columns(
+          col_widths = c(12, 12, 12), gap = "1.5rem",
+          
+          # Regulatory Thresholds Block
+          card(
+            card_header(class="bg-primary text-white fw-bold d-flex align-items-center gap-2", bs_icon("bank"), "Regulatory Thresholds"), 
+            card_body(
+              class="p-4", 
+              layout_columns(
+                col_widths=c(6,6), 
+                tags$div(
+                  class="border-end pe-4", 
+                  tags$h6("Individual Mass Threshold", class="fw-bold text-danger text-uppercase mb-3"), 
+                  tags$p(class="text-muted", HTML("Reporting is mandatory for <strong>each individual</strong> Part 1, Group C PFAS if its specific, combined facility-wide mass is ≥ 1.0 kg/year.")), 
+                  tags$div(class="d-inline-flex align-items-center gap-2 px-3 py-2 bg-danger bg-opacity-10 rounded border border-danger mb-2", bs_icon("exclamation-circle-fill", class="text-danger"), tags$h4("≥ 1.0 kg/year", class="text-danger fw-bold mb-0"))
+                ), 
+                tags$div(
+                  class="ps-2", 
+                  tags$h6("Facility Exemption", class="fw-bold text-secondary text-uppercase mb-3"), 
+                  tags$p(class="text-muted", "WWTPs are entirely exempt from reporting requirements if their annual average discharge is:"), 
+                  tags$div(class="d-inline-flex align-items-center gap-2 px-3 py-2 bg-secondary bg-opacity-10 rounded border border-secondary", bs_icon("droplet-fill", class="text-secondary"), tags$h4("< 10,000 m³/day", class="text-secondary fw-bold mb-0"))
+                )
+              )
+            )
+          ),
+          
+          # Engineering Math Block
+          card(
+            card_header(class="bg-info text-white fw-bold d-flex align-items-center gap-2", bs_icon("calculator"), "Engineering Math"), 
+            card_body(
+              class="p-4 bg-light bg-opacity-50", 
+              layout_columns(
+                col_widths=c(8,4), 
+                tags$div(
+                  class="border-end pe-4", 
+                  tags$h6("Mass Balance Equations", class="fw-bold text-info text-uppercase mb-3"), 
+                  tags$div(class="p-3 bg-white rounded border shadow-sm mb-3", tags$p(class="fw-bold mb-1 text-primary small", "Liquid Pathway:"), tags$code("PFAS (kg) = Volume (L) × Concentration (ng/L) × 10⁻¹² kg/ng", class="text-dark")), 
+                  tags$div(class="p-3 bg-white rounded border shadow-sm", tags$p(class="fw-bold mb-1 text-success small", "Solid Pathway:"), tags$code("PFAS (kg) = Weight (tonnes) × 10⁶ g/t × Concentration (ng/g) × 10⁻¹² kg/ng", class="text-dark"))
+                ), 
+                tags$div(
+                  class="ps-2", 
+                  tags$h6("Non-Detect Protocol", class="fw-bold text-info text-uppercase mb-3"), 
+                  tags$div(class="d-flex align-items-center justify-content-center py-3 bg-white rounded border border-info shadow-sm text-center mb-3", tags$h4("ND / 2", class="text-info fw-bold mb-0")), 
+                  tags$p("Values below the limit of quantification (e.g., '< 0.5') are halved for calculations.", class="small mb-0 text-muted")
+                )
+              )
+            )
+          ),
+          
+          # By-Product Classification Block
+          card(
+            card_header(class="bg-dark text-white fw-bold d-flex align-items-center gap-2", bs_icon("shield-exclamation"), "By-Product Classification"), 
+            card_body(
+              class="p-4", 
+              tags$p("Standard NPRI reporting is subject to a ≥ 0.1% concentration threshold. ", tags$strong("This does not apply to wastewater facilities.", class="text-danger")), 
+              tags$p("All PFAS collected in influent or generated via transformation are legally classified as ", tags$em("by-products"), ". All trace mass must be calculated regardless of concentration.", class="mb-0 text-muted")
+            )
+          )
+        )
+      )
+    ),
+    
+    # Tab: QA/QC Diagnostics
+    nav_panel("Data QA/QC", icon = bs_icon("check2-square"), tags$div(class="p-3", uiOutput(ns("diagnostic_ui"))))
+  )
+}
+
+
+# ==============================================================================
+# Server Modules
+# ==============================================================================
+
+mod_sidebar_server <- function(id) {
+  moduleServer(id, function(input, output, session) {
+    
+    # Dynamic UI updates for facility profiles
+    observeEvent(input$treat, {
+      req(input$treat)
+      valid_mixes <- MATRIX_REGISTRY$mix[MATRIX_REGISTRY$treat == input$treat] |> unique()
+      updateRadioGroupButtons(session, "res_mix", choices = valid_mixes, selected = valid_mixes[1])
+    })
+    
+    observeEvent(c(input$treat, input$res_mix), {
+      req(input$treat, input$res_mix)
+      valid_solids <- MATRIX_REGISTRY$solids[MATRIX_REGISTRY$treat == input$treat & MATRIX_REGISTRY$mix == input$res_mix] |> unique()
+      updatePickerInput(session, "solids_process", choices = valid_solids, selected = valid_solids[1])
+    })
+    
+    output$data_source_help <- renderUI({
+      req(input$data_source)
+      if (input$data_source == "eccc") {
+        tags$div(class="small text-muted d-flex align-items-center gap-1 mb-2 mt-1", bs_icon("check2-circle", class="text-success"), tags$em("Routing to ECCC Tables 7 & 8"))
+      } else {
+        tags$div(class="small text-warning d-flex align-items-center gap-1 mb-2 mt-1", bs_icon("tools"), tags$em("Lab data upload in development"))
+      }
+    })
+    
+    # Return inputs as a reactive list to decouple sidebar logic from dashboard logic
+    return(list(
+      state = reactive({
+        list(
+          site_name      = input$site_name, 
+          data_source    = input$data_source,
+          active_streams = input$active_streams %||% character(0),
+          treat          = input$treat, 
+          res_mix        = input$res_mix, 
+          solids_process = input$solids_process,
+          flow_val       = input$flow_val, 
+          flow_unit      = input$flow_unit,
+          dry_tonnes     = input$dry_tonnes, 
+          solids_unit    = input$solids_unit
+        )
+      }),
+      export_click = reactive({ input$export_csv })
+    ))
   })
+}
+
+
+mod_dashboard_server <- function(id, sidebar_data, app_data) {
+  moduleServer(id, function(input, output, session) {
+    
+    # Set server = FALSE for selectizeInput to prevent WebR AJAX call failures
+    observe({ 
+      updateSelectizeInput(session, "cas_filter", choices = sort(unique(app_data$targets$cas_rn)), server = FALSE) 
+    })
+    
+    daily_flow_mld <- reactive({
+      req(sidebar_data$state()$flow_unit)
+      safe_flow <- dplyr::if_else(is.na(sidebar_data$state()$flow_val), 0, sidebar_data$state()$flow_val)
+      if(sidebar_data$state()$flow_unit == "m³/y") (safe_flow / 1000) / 365 else safe_flow / 365
+    })
+    
+    # Primary data joining and transformation pipeline
+    base_data <- reactive({
+      state <- sidebar_data$state()
+      req(state$treat, state$res_mix, state$solids_process, state$data_source) 
+      
+      base_frame <- app_data$targets |> dplyr::select(substance_name, cas_rn)
+      
+      # Handle lab data stub
+      if (state$data_source == "lab") {
+        return(base_frame |> dplyr::mutate(
+          mass_liq = 0, res_col_liq = "N/A", trace_err_liq = "Lab mode pending", trace_conc_liq = NA_real_, 
+          mass_sol = 0, res_col_sol = "N/A", trace_err_sol = "Lab mode pending", trace_conc_sol = NA_real_, 
+          aggregate_kg = 0
+        ))
+      }
+      
+      current_reg <- MATRIX_REGISTRY[MATRIX_REGISTRY$treat == state$treat & MATRIX_REGISTRY$mix == state$res_mix & MATRIX_REGISTRY$solids == state$solids_process, ]
+      
+      # Evaluate Liquid Pathway
+      if ("liq" %in% state$active_streams) {
+        liq_df <- calc_stream(base_frame, app_data$eff_spec, current_reg, state$flow_val, state$flow_unit, "liq")
+        base_frame <- base_frame |> dplyr::left_join(
+          liq_df |> 
+            dplyr::select(-conc) |> 
+            dplyr::rename(mass_liq = mass_kg, res_col_liq = res_col, trace_err_liq = trace_err, trace_vol_liq = trace_vol, trace_unit_liq = trace_unit, trace_conc_liq = trace_conc, trace_source_liq = trace_source), 
+          by = "cas_rn"
+        )
+      } else {
+        # Explicitly pad disabled columns with NA to maintain reactable structure
+        base_frame <- base_frame |> dplyr::mutate(
+          mass_liq = 0, res_col_liq = "N/A", trace_err_liq = "Stream manually disabled.", 
+          trace_vol_liq = NA_real_, trace_unit_liq = NA_character_, trace_conc_liq = NA_real_, trace_source_liq = NA_character_
+        )
+      }
+      
+      # Evaluate Solid Pathway
+      if ("sol" %in% state$active_streams) {
+        sol_df <- calc_stream(base_frame, app_data$bio_spec, current_reg, state$dry_tonnes, state$solids_unit, "sol")
+        base_frame <- base_frame |> dplyr::left_join(
+          sol_df |> 
+            dplyr::select(-conc) |> 
+            dplyr::rename(mass_sol = mass_kg, res_col_sol = res_col, trace_err_sol = trace_err, trace_vol_sol = trace_vol, trace_unit_sol = trace_unit, trace_conc_sol = trace_conc, trace_source_sol = trace_source), 
+          by = "cas_rn"
+        )
+      } else {
+        base_frame <- base_frame |> dplyr::mutate(
+          mass_sol = 0, res_col_sol = "N/A", trace_err_sol = "Stream manually disabled.", 
+          trace_vol_sol = NA_real_, trace_unit_sol = NA_character_, trace_conc_sol = NA_real_, trace_source_sol = NA_character_
+        )
+      }
+      
+      # Aggregate mass
+      base_frame |> dplyr::mutate(
+        dplyr::across(dplyr::starts_with("mass"), \(x) dplyr::coalesce(x, 0)), 
+        aggregate_kg = mass_liq + mass_sol
+      )
+    })
+    
+    final_display_data <- reactive({
+      df <- base_data()
+      if (!is.null(input$cas_filter) && length(input$cas_filter) > 0) df <- df |> dplyr::filter(cas_rn %in% input$cas_filter)
+      if (isTRUE(input$hide_zero)) df <- df |> dplyr::filter(aggregate_kg > APP_CONFIG$zero_tol)
+      df
+    })
+    
+    # Top Ribbon UI Generation
+    output$top_ribbon <- renderUI({
+      df <- final_display_data()
+      state <- sidebar_data$state()
+      is_dev <- state$data_source == "lab"
+      avg_mld <- daily_flow_mld()
+      
+      is_mandatory <- isTRUE(avg_mld >= APP_CONFIG$limit_mld)
+      total_val    <- sum(df$aggregate_kg, na.rm = TRUE)
+      report_count <- sum(df$aggregate_kg >= APP_CONFIG$threshold_kg, na.rm = TRUE)
+      is_danger    <- isTRUE(report_count > 0)
+      
+      status_text  <- if(!is_mandatory) "EXEMPT" else if (!is_danger) "BELOW LIMIT" else sprintf("REPORTABLE: %d PFAS", report_count)
+      status_sub   <- if(!is_mandatory) "Flow < 10 ML/d" else if (!is_danger) "All compounds < 1.0 kg/y" else "≥ 1.0 kg/y and Flow ≥ 10 ML/d"
+      status_icon  <- if(!is_mandatory) "shield-check" else if (!is_danger) "check-circle" else "exclamation-triangle"
+      status_color <- if(!is_mandatory) "bg-secondary" else if (!is_danger) "bg-success" else "bg-danger"
+      
+      layout_columns(
+        class = "mb-3", gap = "0.5rem", fill = FALSE,
+        dense_metric_card("Total PFAS Load", sprintf("%s kg", formatC(total_val, format='f', digits=2, big.mark=',')), if(is_dev) "Site-Specific" else "ECCC Tables", "speedometer2", if(is_dev) "bg-info" else "bg-primary"),
+        dense_metric_card("Compliance Status", status_text, status_sub, status_icon, status_color),
+        dense_metric_card(toupper(state$site_name %||% "Unknown Facility"), if(is_mandatory) "MANDATORY" else "EXEMPT", sprintf("Avg: %.1f ML/d", avg_mld), "building", if(is_mandatory) "bg-primary" else "bg-secondary"),
+        dense_metric_card("PFAS Coverage", sprintf("%d Tracked", nrow(app_data$targets)), sprintf("%d Active | %d Over Limit", nrow(df), report_count), "list-check", "bg-info")
+      )
+    })
+    
+    # Data Export Handler
+    # Translates data to CSV format and passes it to the client via session$sendCustomMessage
+    observeEvent(sidebar_data$export_click(), {
+      req(sidebar_data$export_click() > 0)
+      df <- final_display_data()
+      state <- sidebar_data$state()
+      
+      export_df <- df |> dplyr::select(
+        `Substance` = substance_name, 
+        `CAS` = cas_rn, 
+        `Liquids (kg_y)` = mass_liq, 
+        `Solids (kg_y)` = mass_sol, 
+        `Total (kg_y)` = aggregate_kg
+      )
+      
+      con <- textConnection("csv_out", "w")
+      write.csv(export_df, con, row.names = FALSE)
+      close(con)
+      
+      csv_string <- paste(csv_out, collapse = "\n")
+      filename <- paste0("NPRI-PFAS-", if(isTruthy(state$site_name)) gsub("[^A-Za-z0-9_-]", "-", state$site_name) else "Facility", "-", Sys.Date(), ".csv")
+      
+      session$sendCustomMessage("download_csv", list(filename = filename, csv_data = csv_string))
+    })
+    
+    # Main Data Table Generation
+    output$main_table <- renderReactable({
+      req(input$sig_figs)
+      data <- final_display_data()
+      is_mandatory <- isTRUE(daily_flow_mld() >= APP_CONFIG$limit_mld)
+      
+      reactable(
+        data, 
+        pagination = FALSE,
+        highlight = TRUE, 
+        defaultSorted = "aggregate_kg", 
+        defaultSortOrder = "desc",
+        rowStyle = function(index) { 
+          if (!is.null(index) && data$aggregate_kg[index] >= APP_CONFIG$threshold_kg) list(backgroundColor = "#f8d7da") 
+        },
+        details = function(index) {
+          row <- data[index, ]
+          
+          # Effluent trace formatting
+          liq_trace <- if (!is.na(row$trace_err_liq)) {
+            tags$li(tags$strong("Effluent: "), tags$span(class="text-danger", row$trace_err_liq))
+          } else if (is.na(row$trace_conc_liq)) {
+            tags$li(tags$strong("Effluent: "), tags$span(class="text-muted", "Not tested in this matrix."))
+          } else {
+            tags$li(
+              tags$strong("Effluent: "), 
+              sprintf("(Vol: %s %s) × (Conc: %s ng/L) × 10⁻¹² = %s kg/y", row$trace_vol_liq, row$trace_unit_liq, signif(row$trace_conc_liq, 3), signif(row$mass_liq, 4)), 
+              tags$br(), 
+              tags$span(class = "text-muted small ms-2", sprintf("\u21B3 Source: %s", row$trace_source_liq))
+            )
+          }
+          
+          # Biosolids trace formatting
+          sol_trace <- if (!is.na(row$trace_err_sol)) {
+            tags$li(tags$strong("Biosolids: "), tags$span(class="text-danger", row$trace_err_sol))
+          } else if (is.na(row$trace_conc_sol)) {
+            tags$li(tags$strong("Biosolids: "), tags$span(class="text-muted", "Not tested in this matrix."))
+          } else {
+            tags$li(
+              tags$strong("Biosolids: "), 
+              sprintf("(Mass: %s %s) × (Conc: %s ng/g) × 10⁻¹² = %s kg/y", row$trace_vol_sol, row$trace_unit_sol, signif(row$trace_conc_sol, 3), signif(row$mass_sol, 4)), 
+              tags$br(), 
+              tags$span(class = "text-muted small ms-2", sprintf("\u21B3 Source: %s", row$trace_source_sol))
+            )
+          }
+          
+          # Unicode is used for the icon to avoid React DOM string escaping issues
+          tags$div(
+            class = "p-3 bg-light border rounded small m-2",
+            tags$h6(class="fw-bold text-primary mb-2", "\U0001F9EE Calculation Trace"),
+            tags$ul(class = "list-unstyled mb-0 lh-lg", liq_trace, sol_trace)
+          )
+        },
+        theme = reactableTheme(
+          headerStyle = list(backgroundColor = APP_CONFIG$theme_primary, color = "#fff", position = "sticky", top = 0, zIndex = 1), 
+          cellStyle = list(padding = "10px 8px")
+        ),
+        columns = list(
+          substance_name = colDef(name = "Substance", minWidth = 250, cell = function(value, index) {
+            is_over <- data$aggregate_kg[index] >= APP_CONFIG$threshold_kg
+            if (is_over && is_mandatory) {
+              htmltools::tagList(tags$span(value, class="fw-bold text-danger"), tags$span("\U0001F6A8 REPORTABLE", class="badge bg-danger ms-2"))
+            } else if (is_over && !is_mandatory) {
+              htmltools::tagList(tags$span(value, class="fw-bold text-warning"), tags$span("\U0001F6A8 OVER MASS (EXEMPT FLOW)", class="badge bg-warning text-dark ms-2"))
+            } else {
+              value
+            }
+          }),
+          cas_rn       = colDef(name = "CAS RN", align = "center", width = 110),
+          mass_liq     = colDef(name = "Liquids (kg/y)", align = "right", minWidth = 110, cell = \(v) fmt_sigfigs(v, input$sig_figs)),
+          mass_sol     = colDef(name = "Solids (kg/y)", align = "right", minWidth = 110, cell = \(v) fmt_sigfigs(v, input$sig_figs)),
+          aggregate_kg = colDef(name = "Total (kg/y)", align = "right", minWidth = 130, cell = \(v) fmt_sigfigs(v, input$sig_figs), style = function(v) {
+            bar_w <- min(100, (v / APP_CONFIG$threshold_kg) * 100)
+            list(
+              background = sprintf("linear-gradient(90deg, %s %s%%, transparent %s%%)", if(v >= APP_CONFIG$threshold_kg) "#f8d7da" else "#e2e3e5", bar_w, bar_w), 
+              fontWeight = "bold", 
+              color = if(v >= APP_CONFIG$threshold_kg) "#842029" else "inherit"
+            )
+          }),
+          # Hide utility and trace columns from the primary display
+          res_col_liq = colDef(show=F), trace_err_liq = colDef(show=F), trace_vol_liq = colDef(show=F), trace_unit_liq = colDef(show=F), trace_conc_liq = colDef(show=F), trace_source_liq = colDef(show=F),
+          res_col_sol = colDef(show=F), trace_err_sol = colDef(show=F), trace_vol_sol = colDef(show=F), trace_unit_sol = colDef(show=F), trace_conc_sol = colDef(show=F), trace_source_sol = colDef(show=F)
+        )
+      )
+    })
+    
+    # QA/QC Dashboard Generation
+    output$diagnostic_ui <- renderUI({
+      df <- base_data()
+      state <- sidebar_data$state()
+      
+      liq_active <- "liq" %in% state$active_streams
+      sol_active <- "sol" %in% state$active_streams
+      
+      err_liq  <- if(liq_active) sum(is.na(df$trace_conc_liq)) else 0
+      err_sol  <- if(sol_active) sum(is.na(df$trace_conc_sol)) else 0
+      
+      zero_liq <- if(liq_active) sum(df$trace_conc_liq == 0, na.rm = TRUE) else 0
+      zero_sol <- if(sol_active) sum(df$trace_conc_sol == 0, na.rm = TRUE) else 0
+      
+      layout_columns(
+        col_widths = 12, gap = "1rem",
+        card(
+          card_header(bs_icon("clipboard-data"), "Data Pipeline Health", class="bg-primary text-white"),
+          card_body(
+            layout_columns(
+              col_widths = c(6, 6),
+              tags$ul(
+                class="list-group list-group-flush border-end pe-3",
+                tags$li(class="list-group-item d-flex justify-content-between align-items-center", "Target Substances", tags$span(class="badge bg-primary rounded-pill", nrow(app_data$targets))),
+                tags$li(class="list-group-item d-flex justify-content-between align-items-center mt-2", "Missing Effluent Concentrations (NA)", tags$span(class=sprintf("badge rounded-pill %s", if(!liq_active) "bg-secondary" else if(err_liq>0) "bg-danger" else "bg-success"), if(!liq_active) "Disabled" else err_liq)),
+                tags$li(class="list-group-item d-flex justify-content-between align-items-center bg-light", "Zero Concentration - Effluent (Tested but ND)", tags$span(class=sprintf("badge rounded-pill %s", if(!liq_active) "bg-secondary" else if(zero_liq>0) "text-bg-warning" else "bg-success"), if(!liq_active) "Disabled" else zero_liq)),
+                tags$li(class="list-group-item d-flex justify-content-between align-items-center mt-2", "Missing Biosolid Concentrations (NA)", tags$span(class=sprintf("badge rounded-pill %s", if(!sol_active) "bg-secondary" else if(err_sol>0) "bg-danger" else "bg-success"), if(!sol_active) "Disabled" else err_sol)),
+                tags$li(class="list-group-item d-flex justify-content-between align-items-center bg-light", "Zero Concentration - Biosolids (Tested but ND)", tags$span(class=sprintf("badge rounded-pill %s", if(!sol_active) "bg-secondary" else if(zero_sol>0) "text-bg-warning" else "bg-success"), if(!sol_active) "Disabled" else zero_sol))
+              ),
+              tags$div(
+                class="ps-3",
+                tags$p(class="small fw-bold text-muted mb-1 text-uppercase", "Target Resolution State"),
+                tags$p(class="small fw-bold mb-1", "Liquid Target Matrix Column:"),
+                tags$code(na.omit(unique(df$res_col_liq))[1] %||% "None", class="d-block mb-3 text-break"),
+                tags$p(class="small fw-bold mb-1", "Solid Target Matrix Column:"),
+                tags$code(na.omit(unique(df$res_col_sol))[1] %||% "None", class="d-block text-break")
+              )
+            )
+          )
+        )
+      )
+    })
+  })
+}
+
+
+# ==============================================================================
+# Application UI and Server Initialization
+# ==============================================================================
+
+# Use system fonts to avoid WebR network timeouts
+my_theme <- bs_theme(
+  bootswatch = "flatly", 
+  primary = APP_CONFIG$theme_primary, 
+  "font-size-base" = "0.85rem", 
+  base_font = "system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif", 
+  heading_font = "system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+)
+
+ui <- page_sidebar(
+  title = "NPRI PFAS Compliance Engine",
+  theme = my_theme, 
+  js_download_script, 
+  sidebar = mod_sidebar_ui("app_sidebar"),
+  uiOutput(NS("app_dashboard", "top_ribbon")), 
+  mod_dashboard_ui("app_dashboard")
+)
+
+server <- function(input, output, session) {
+  sidebar_state <- mod_sidebar_server("app_sidebar")
+  mod_dashboard_server("app_dashboard", sidebar_state, app_data)
 }
 
 shinyApp(ui, server)
