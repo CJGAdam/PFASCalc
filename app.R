@@ -1,5 +1,11 @@
 # ==============================================================================
-# Dependencies & Environment
+#
+# Purpose: PFAS Calculator to assiste Wastewater Plants with NPRI Reporting
+# Deployment: Shinylive - shinylive::export(".", "docs")
+# Author: CJGAdam
+# Criteria source: https://www.canada.ca/en/environment-climate-change/services/national-pollutant-release-inventory/report/pfas.html
+# ==============================================================================
+# Dependencies 
 # ==============================================================================
 library(shiny)          # Core framework
 library(bslib)          # UI components and layout
@@ -9,12 +15,11 @@ library(htmltools)      # HTML construction
 library(dplyr)          # Data manipulation
 library(shinyWidgets)   # Enhanced UI inputs
 
-# Base R fallback for null/NA coalescing
+# Base R fallback for null coalescing
 `%||%` <- function(x, y) if (is.null(x) || length(x) == 0 || all(is.na(x))) y else x
 
 # Client-side CSV download handler
-# Allows file exports in WebR/Shinylive environments where a standard server-side 
-# downloadHandler is unavailable.
+# Workaround for file download in Shinylive environment
 js_download_script <- tags$head(tags$script(HTML("
   $(document).on('shiny:sessioninitialized', function() {
     Shiny.addCustomMessageHandler('download_csv', function(message) {
@@ -33,7 +38,7 @@ js_download_script <- tags$head(tags$script(HTML("
 ")))
 
 # ==============================================================================
-# Configuration & Matrix Registry
+# Configuration
 # ==============================================================================
 APP_CONFIG <- list(
   data_dir       = "data/rds/",
@@ -64,9 +69,8 @@ INIT_TREAT  <- unique(MATRIX_REGISTRY$treat)[1]
 INIT_MIXES  <- unique(MATRIX_REGISTRY$mix[MATRIX_REGISTRY$treat == INIT_TREAT])
 INIT_SOLIDS <- unique(MATRIX_REGISTRY$solids[MATRIX_REGISTRY$treat == INIT_TREAT & MATRIX_REGISTRY$mix == INIT_MIXES[1]])
 
-
 # ==============================================================================
-# Core Functions & Data Processing
+# Core Functions 
 # ==============================================================================
 
 # Formats numeric values to a specified number of significant figures
@@ -76,6 +80,7 @@ fmt_sigfigs <- function(v, sig_figs) {
 }
 
 # Standardizes column names and applies the ND/2 protocol for non-detect strings
+# ND/2 is from the EC guidance
 clean_pfas <- function(df) {
   names(df) <- tolower(gsub("[^[:alnum:]_]", "_", names(df)))
   
@@ -105,7 +110,7 @@ clean_pfas <- function(df) {
     )
 }
 
-# Loads static RDS files and resolves relative paths for WebR environments
+# Loads static RDS files and resolves relative paths for virtual environments
 load_app_data <- function() {
   possible_paths <- c(APP_CONFIG$data_dir, paste0("/", APP_CONFIG$data_dir), "./data/rds/", "data/rds/")
   dir_path <- Find(dir.exists, possible_paths)
@@ -120,8 +125,7 @@ load_app_data <- function() {
     ))
   }
   
-  # File mtimes are often reset to the Unix epoch in virtual filesystems. 
-  # This tryCatch prevents NA errors during date formatting.
+# tryCatch prevents NA errors with virtual filesystems.
   raw_time <- tryCatch({
     mtime <- file.info(file.path(dir_path, "Table_1.rds"))$mtime
     if (is.na(mtime) || as.numeric(format(mtime, "%Y")) < 2024) {
@@ -143,7 +147,7 @@ load_app_data <- function() {
 # Executes mass balance calculations for a given waste stream (liquid or solid)
 calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
   
-  # Helper to return a padded dataframe when calculation criteria are unmet
+  # Helper to return padded dataframe when criteria are not met
   safe_return <- function(msg, col_status = "ERR") {
     base_df |> 
       dplyr::select(cas_rn) |> 
@@ -190,7 +194,7 @@ calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
 }
 
 # ------------------------------------------------------------------------------
-# UI Component Builders
+# UI Building
 # ------------------------------------------------------------------------------
 
 lbl_with_tt <- function(icon_name, text, tt_text) {
@@ -238,7 +242,7 @@ mod_sidebar_ui <- function(id) {
         lbl_with_tt("database", "Data Source", "Select ECCC modeled estimates or site-specific lab data."),
         radioGroupButtons(ns("data_source"), NULL, choices = c("ECCC Estimates" = "eccc", "Custom Lab Data" = "lab"), selected = "eccc", justified = TRUE, status = "outline-primary", size = "sm"),
         uiOutput(ns("data_source_help")),
-        lbl_with_tt("signpost-split", "Active Pathways", "Toggle the waste streams applicable to this facility."),
+        lbl_with_tt("signpost-split", "Active Waste Streams", "Toggle the waste streams applicable to this facility."),
         checkboxGroupButtons(ns("active_streams"), NULL, choices = c("Effluent" = "liq", "Biosolids" = "sol"), selected = c("liq", "sol"), justified = TRUE, status = "outline-primary", size = "sm")
       ),
       
@@ -409,7 +413,6 @@ mod_dashboard_ui <- function(id) {
   )
 }
 
-
 # ==============================================================================
 # Server Modules
 # ==============================================================================
@@ -459,7 +462,6 @@ mod_sidebar_server <- function(id) {
     ))
   })
 }
-
 
 mod_dashboard_server <- function(id, sidebar_data, app_data) {
   moduleServer(id, function(input, output, session) {
@@ -722,12 +724,11 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
   })
 }
 
-
 # ==============================================================================
 # Application UI and Server Initialization
 # ==============================================================================
 
-# Use system fonts to avoid WebR network timeouts
+# Use system fonts for theme to avoid downloads
 my_theme <- bs_theme(
   bootswatch = "flatly", 
   primary = APP_CONFIG$theme_primary, 
