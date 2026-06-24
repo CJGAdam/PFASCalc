@@ -4,16 +4,17 @@
 # Deployment: Shinylive - shinylive::export(".", "docs")
 # Author: CJGAdam
 # Criteria source: https://www.canada.ca/en/environment-climate-change/services/national-pollutant-release-inventory/report/pfas.html
+#
 # ==============================================================================
 # Dependencies 
 # ==============================================================================
-library(shiny)          # Core framework
+library(shiny)          # Core web app framework
 library(bslib)          # UI components and layout
 library(bsicons)        # SVG icons
 library(reactable)      # Interactive data tables
-library(htmltools)      # HTML construction
-library(dplyr)          # Data manipulation
-library(shinyWidgets)   # Enhanced UI inputs
+library(htmltools)      # HTML customization in R
+library(dplyr)          # Data pipe edits
+library(shinyWidgets)   # Extra Shiny UI features
 
 # Base R fallback for null coalescing
 `%||%` <- function(x, y) if (is.null(x) || length(x) == 0 || all(is.na(x))) y else x
