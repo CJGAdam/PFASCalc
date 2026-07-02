@@ -12,7 +12,7 @@ library(bslib)          # UI components and layout
 library(bsicons)        # SVG icons
 library(reactable)      # Interactive data tables
 library(htmltools)      # HTML construction
-library(shinyWidgets)   # Enhanced UI inputs
+# NOTE: shinyWidgets and poorman/dplyr have been completely removed.
 
 # Base R fallback for null coalescing
 `%||%` <- function(x, y) {
@@ -236,7 +236,7 @@ resolve_matrix_col <- function(target_df, requested_col) {
   NA_character_
 }
 
-# Executes mass balance calculations for a given waste stream (Base R Refactor)
+# Executes mass balance calculations for a given waste stream (Base R)
 calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
   
   safe_return <- function(msg, col_status = "ERR") {
@@ -296,7 +296,7 @@ calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
 }
 
 # ------------------------------------------------------------------------------
-# UI Building
+# UI Building Helpers
 # ------------------------------------------------------------------------------
 
 lbl_with_tt <- function(icon_name, text, tt_text) {
@@ -362,27 +362,22 @@ mod_sidebar_ui <- function(id) {
         textInput(ns("site_name"), NULL, "e.g., North End WWTP", width = "100%"),
         
         lbl_with_tt("database", "Data Source", "Select ECCC modeled estimates or site-specific lab data."),
-        radioGroupButtons(
+        radioButtons(
           ns("data_source"),
           NULL,
           choices = c("ECCC Estimates" = "eccc", "Custom Lab Data" = "lab"),
-          selected = "eccc",
-          justified = TRUE,
-          status = "outline-primary",
-          size = "sm"
+          selected = "eccc"
         ),
         
         uiOutput(ns("data_source_help")),
         
         lbl_with_tt("signpost-split", "Active Waste Streams", "Toggle the waste streams applicable to this facility."),
-        checkboxGroupButtons(
+        checkboxGroupInput(
           ns("active_streams"),
           NULL,
           choices = c("Effluent" = "liq", "Biosolids" = "sol"),
           selected = c("liq", "sol"),
-          justified = TRUE,
-          status = "outline-primary",
-          size = "sm"
+          inline = TRUE
         )
       ),
       
@@ -395,7 +390,7 @@ mod_sidebar_ui <- function(id) {
         icon = bs_icon("building-gear", class = "text-primary"),
         
         lbl_with_tt("funnel", "Treatment Tier", "The highest level of liquid treatment achieved by the facility."),
-        pickerInput(
+        selectInput(
           ns("treat"),
           NULL,
           choices = unique(MATRIX_REGISTRY$treat),
@@ -404,18 +399,15 @@ mod_sidebar_ui <- function(id) {
         ),
         
         lbl_with_tt("people", "Influent Mix", "The percentage of influent originating from residential sources."),
-        radioGroupButtons(
+        radioButtons(
           ns("res_mix"),
           NULL,
           choices = INIT_MIXES,
-          selected = INIT_MIXES[1],
-          justified = TRUE,
-          size = "sm",
-          status = "outline-primary"
+          selected = INIT_MIXES[1]
         ),
         
         lbl_with_tt("layer-forward", "Solids Processing", "The primary method used to process sludge and biosolids."),
-        pickerInput(
+        selectInput(
           ns("solids_process"),
           NULL,
           choices = INIT_SOLIDS,
@@ -443,13 +435,14 @@ mod_sidebar_ui <- function(id) {
             col_widths = c(8, 4),
             gap = "0.5rem",
             numericInput(ns("flow_val"), NULL, value = 1825, min = 0, width = "100%"),
-            radioGroupButtons(
-              ns("flow_unit"),
-              NULL,
-              choices = c("ML/y", "m³/y"),
-              selected = "ML/y",
-              size = "sm",
-              status = "outline-primary"
+            tags$div(
+              class = "mb-0", 
+              radioButtons(
+                ns("flow_unit"),
+                NULL,
+                choices = c("ML/y", "m³/y"),
+                selected = "ML/y"
+              )
             )
           )
         ),
@@ -467,13 +460,14 @@ mod_sidebar_ui <- function(id) {
               col_widths = c(8, 4),
               gap = "0.5rem",
               numericInput(ns("dry_tonnes"), NULL, value = 50, min = 0, width = "100%"),
-              radioGroupButtons(
-                ns("solids_unit"),
-                NULL,
-                choices = c("t/y", "kg/y"),
-                selected = "t/y",
-                size = "sm",
-                status = "outline-primary"
+              tags$div(
+                class = "mb-0", 
+                radioButtons(
+                  ns("solids_unit"),
+                  NULL,
+                  choices = c("t/y", "kg/y"),
+                  selected = "t/y"
+                )
               )
             )
           )
@@ -534,7 +528,8 @@ mod_dashboard_ui <- function(id) {
             class = "align-items-center mb-0",
             
             tags$div(
-              class = "mb-0",
+              class = "mb-0 shiny-input-margin-fix",
+              style = "margin-bottom: 0 !important;",
               selectizeInput(
                 ns("cas_filter"),
                 NULL,
@@ -725,7 +720,7 @@ mod_sidebar_server <- function(id) {
       valid_mixes <- MATRIX_REGISTRY$mix[MATRIX_REGISTRY$treat == input$treat]
       valid_mixes <- unique(valid_mixes)
       
-      updateRadioGroupButtons(
+      updateRadioButtons(
         session,
         "res_mix",
         choices = valid_mixes,
@@ -741,7 +736,7 @@ mod_sidebar_server <- function(id) {
       ]
       valid_solids <- unique(valid_solids)
       
-      updatePickerInput(
+      updateSelectInput(
         session,
         "solids_process",
         choices = valid_solids,
@@ -818,7 +813,6 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
       state <- sidebar_data$state()
       req(state$treat, state$res_mix, state$solids_process, state$data_source)
       
-      # BASE R: Create base frame safely
       base_frame <- app_data$targets[, c("substance_name", "cas_rn"), drop = FALSE]
       
       if (state$data_source == "lab") {
@@ -913,7 +907,6 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
         base_frame$trace_source_sol <- NA_character_
       }
       
-      # Aggregate Totals (Replace NAs securely)
       base_frame$mass_liq[is.na(base_frame$mass_liq)] <- 0
       base_frame$mass_sol[is.na(base_frame$mass_sol)] <- 0
       base_frame$aggregate_kg <- base_frame$mass_liq + base_frame$mass_sol
