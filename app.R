@@ -1,19 +1,19 @@
 # ==============================================================================
 #
 # Purpose: PFAS Calculator to assist Wastewater Plants with NPRI Reporting
-# Deployment: Shinylive - shinylive::export(".", "docs", include_files = "data/")
+# Deployment: shinylive::export(".", "docs", include_files = c("data/rds/Table_1.rds", "data/rds/Table_7.rds", "data/rds/Table_8.rds"))
 # Author: CJGAdam
 # Criteria source: https://www.canada.ca/en/environment-climate-change/services/national-pollutant-release-inventory/report/pfas.html
 # ==============================================================================
-# Dependencies
+# Dependencies (Optimized for WASM Load Time)
 # ==============================================================================
 library(shiny)          # Core framework
 library(bslib)          # UI components and layout
 library(bsicons)        # SVG icons
 library(reactable)      # Interactive data tables
 library(htmltools)      # HTML construction
-library(dplyr)          # Data manipulation
-library(shinyWidgets)   # Enhanced UI inputs
+library(shinyWidgets)   # Enhanced UI inputs (Retained for testing)
+# NOTE: poorman/dplyr have been completely removed. Base R handles all data logic.
 
 # Base R fallback for null coalescing
 `%||%` <- function(x, y) {
@@ -40,6 +40,43 @@ js_download_script <- tags$head(tags$script(HTML("
     });
   });
 ")))
+
+# ==============================================================================
+# Gatekeeper Native UI Overlay
+# ==============================================================================
+gatekeeper_ui <- tags$div(
+  id = "simple-gatekeeper",
+  style = "position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: #f8f9fa; z-index: 9999; display: flex; flex-direction: column; justify-content: center; align-items: center;",
+  tags$div(
+    class = "shadow p-5 rounded bg-white text-center",
+    style = "max-width: 400px;",
+    bs_icon("lock-fill", size = "3rem", class = "text-primary mb-3"),
+    tags$h3("Restricted Access", class = "text-primary fw-bold mb-3"),
+    tags$p("This PFAS calculator is an internal tool for authorized facility users only.", class = "text-muted mb-4"),
+    tags$div(
+      class = "d-flex gap-2",
+      tags$input(
+        type = "password", 
+        id = "gate_pass", 
+        placeholder = "Enter access code...", 
+        class = "form-control",
+        onkeypress = "if(event.key === 'Enter') document.getElementById('unlock_btn').click();"
+      ),
+      tags$button(
+        "Unlock", 
+        id = "unlock_btn",
+        class = "btn btn-primary fw-bold", 
+        onclick = "
+        if(document.getElementById('gate_pass').value === 'NPRI2026') {
+          document.getElementById('simple-gatekeeper').style.display = 'none';
+        } else {
+          alert('Incorrect access code.');
+          document.getElementById('gate_pass').value = '';
+        }
+      ")
+    )
+  )
+)
 
 # ==============================================================================
 # Configuration
@@ -159,62 +196,15 @@ fmt_sigfigs <- function(v, sig_figs) {
   )
 }
 
-# Standardizes column names and applies the ND/2 protocol for non-detect strings
-# ND/2 is from the EC guidance
-clean_pfas <- function(df) {
-  names(df) <- tolower(gsub("[^[:alnum:]_]", "_", names(df)))
-  
-  if ("pfas" %in% names(df))      names(df)[names(df) == "pfas"] <- "substance_name"
-  if ("substance" %in% names(df)) names(df)[names(df) == "substance"] <- "substance_name"
-  if ("cas" %in% names(df))       names(df)[names(df) == "cas"] <- "cas_rn"
-  if ("cas_rn_s" %in% names(df))  names(df)[names(df) == "cas_rn_s"] <- "cas_rn"
-  
-  df |>
-    dplyr::mutate(
-      dplyr::across(-dplyr::any_of(c("substance_name", "cas_rn")), \(val) {
-        val_str <- trimws(toupper(as.character(val)))
-        
-        is_pure_nd <- !is.na(val_str) & (
-          val_str %in% c("ND", "N/D", "NON-DETECT", "NON DETECT")
-        )
-        
-        is_lt_nd <- !is.na(val_str) & startsWith(val_str, "<")
-        
-        # Keep digits, decimal points, scientific notation, plus signs, minus signs,
-        # and commas. Hyphen is placed at the end of the character class to avoid
-        # invalid regex range errors.
-        num_val <- suppressWarnings(
-          as.numeric(gsub(",", "", gsub("[^0-9eE+.-]", "", val_str)))
-        )
-        
-        dplyr::case_when(
-          is_pure_nd ~ 0,
-          is_lt_nd   ~ num_val / 2,
-          TRUE       ~ num_val
-        )
-      }),
-      dplyr::across(
-        dplyr::any_of(c("substance_name", "cas_rn")),
-        \(val) trimws(as.character(val))
-      )
-    )
-}
-
 # Loads static RDS files and resolves relative paths for virtual environments
 load_app_data <- function() {
-  possible_paths <- unique(c(
-    APP_CONFIG$data_dir,
-    paste0("/", APP_CONFIG$data_dir),
-    "./data/rds/",
-    "data/rds/"
-  ))
-  
+  possible_paths <- c("data/rds/", "./data/rds/", "/data/rds/")
   existing_paths <- possible_paths[dir.exists(possible_paths)]
-  dir_path <- existing_paths[1] %||% NA_character_
+  dir_path <- if (length(existing_paths) > 0) existing_paths[1] else NA_character_
   
-  if (is.na(dir_path)) {
+  if (is.na(dir_path) || !file.exists(file.path(dir_path, "Table_1.rds"))) {
     return(list(
-      status = "Missing Data Directory",
+      status = "Missing Data Directory or Files",
       targets = data.frame(
         substance_name = character(),
         cas_rn = character(),
@@ -226,23 +216,19 @@ load_app_data <- function() {
     ))
   }
   
-  # Read the raw Table 1 file to extract the embedded date
   raw_table_1 <- readRDS(file.path(dir_path, "Table_1.rds"))
-  
-  # Extract the embedded date attribute (fallback to "Current ECCC Baseline" if missing)
   embedded_date <- attr(raw_table_1, "scrape_date") %||% "Current ECCC Baseline"
   
   list(
-    targets     = clean_pfas(raw_table_1),
-    eff_spec    = clean_pfas(readRDS(file.path(dir_path, "Table_7.rds"))),
-    bio_spec    = clean_pfas(readRDS(file.path(dir_path, "Table_8.rds"))),
+    targets     = raw_table_1,
+    eff_spec    = readRDS(file.path(dir_path, "Table_7.rds")),
+    bio_spec    = readRDS(file.path(dir_path, "Table_8.rds")),
     scrape_date = embedded_date,
     status      = "Loaded"
   )
 }
 
 # Resolves matrix column names robustly.
-# Handles the historical "anerobic" typo and future-corrected "anaerobic" spelling.
 resolve_matrix_col <- function(target_df, requested_col) {
   if (
     is.null(target_df) ||
@@ -261,7 +247,6 @@ resolve_matrix_col <- function(target_df, requested_col) {
   }
   
   alt_col <- requested_col
-  
   if (grepl("anerobic", alt_col, fixed = TRUE)) {
     alt_col <- gsub("anerobic", "anaerobic", alt_col, fixed = TRUE)
   } else if (grepl("anaerobic", alt_col, fixed = TRUE)) {
@@ -290,58 +275,38 @@ resolve_matrix_col <- function(target_df, requested_col) {
   NA_character_
 }
 
-# Executes mass balance calculations for a given waste stream: liquid or solid
+# Executes mass balance calculations for a given waste stream
 calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
   
+  # BASE R REFACTOR: Build a direct dataframe instead of using mutate()
   safe_return <- function(msg, col_status = "ERR") {
-    base_df |>
-      dplyr::select(cas_rn) |>
-      dplyr::mutate(
-        conc         = NA_real_,
-        mass_kg      = 0,
-        res_col      = col_status,
-        trace_vol    = NA_real_,
-        trace_unit   = NA_character_,
-        trace_conc   = NA_real_,
-        trace_source = NA_character_,
-        trace_err    = msg
-      )
+    data.frame(
+      cas_rn       = base_df$cas_rn,
+      conc         = NA_real_,
+      mass_kg      = 0,
+      res_col      = col_status,
+      trace_vol    = NA_real_,
+      trace_unit   = NA_character_,
+      trace_conc   = NA_real_,
+      trace_source = NA_character_,
+      trace_err    = msg,
+      stringsAsFactors = FALSE
+    )
   }
   
-  if (!is.data.frame(reg_row) || nrow(reg_row) == 0) {
-    return(safe_return("Invalid registry configuration."))
-  }
+  if (!is.data.frame(reg_row) || nrow(reg_row) == 0) return(safe_return("Invalid registry configuration."))
+  if (is.null(target_df) || !is.data.frame(target_df) || nrow(target_df) == 0) return(safe_return("Source matrix missing.", "N/A"))
   
-  if (is.null(target_df) || !is.data.frame(target_df) || nrow(target_df) == 0) {
-    return(safe_return("Source matrix missing.", "N/A"))
-  }
-  
-  requested_col <- if (type == "liq") {
-    reg_row[["col_liq"]][1]
-  } else {
-    reg_row[["col_sol"]][1]
-  }
-  
+  requested_col <- if (type == "liq") reg_row[["col_liq"]][1] else reg_row[["col_sol"]][1]
   audit_label <- reg_row[["label"]][1] %||% "Unknown matrix"
   
   target_col <- resolve_matrix_col(target_df, requested_col)
   
   if (is.na(target_col) || !(target_col %in% names(target_df))) {
-    return(safe_return(
-      sprintf("Matrix column unavailable: %s", requested_col %||% "NULL"),
-      "N/A"
-    ))
+    return(safe_return(sprintf("Matrix column unavailable: %s", requested_col %||% "NULL"), "N/A"))
   }
   
-  safe_vol <- if (
-    is.null(volume) ||
-    length(volume) == 0 ||
-    is.na(volume)
-  ) {
-    0
-  } else {
-    volume
-  }
+  safe_vol <- if (is.null(volume) || length(volume) == 0 || is.na(volume)) 0 else volume
   
   unit_conv <- if (type == "liq") {
     if (unit == "ML/y") APP_CONFIG$ml_to_l else APP_CONFIG$m3_to_l
@@ -349,21 +314,30 @@ calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
     if (unit == "t/y") APP_CONFIG$t_to_g else APP_CONFIG$kg_to_g
   }
   
-  target_df |>
-    dplyr::select(cas_rn, conc = dplyr::all_of(target_col)) |>
-    dplyr::mutate(
-      mass_kg = dplyr::if_else(
-        is.na(conc),
-        0,
-        safe_vol * unit_conv * conc * APP_CONFIG$ng_to_kg
-      ),
-      res_col      = target_col,
-      trace_vol    = safe_vol,
-      trace_unit   = unit,
-      trace_conc   = conc,
-      trace_source = audit_label,
-      trace_err    = NA_character_
-    )
+  # BASE R REFACTOR: Subsetting and column assignment
+  # Grab only the CAS and the specific concentration column we need
+  stream_df <- target_df[, c("cas_rn", target_col)]
+  colnames(stream_df) <- c("cas_rn", "conc")
+  
+  # Perform math using Base R vectorized ifelse
+  stream_df$mass_kg <- ifelse(
+    is.na(stream_df$conc),
+    0,
+    safe_vol * unit_conv * stream_df$conc * APP_CONFIG$ng_to_kg
+  )
+  
+  # Assign trace data
+  stream_df$res_col <- target_col
+  stream_df$trace_vol <- safe_vol
+  stream_df$trace_unit <- unit
+  stream_df$trace_conc <- stream_df$conc
+  stream_df$trace_source <- audit_label
+  stream_df$trace_err <- NA_character_
+  
+  # Remove the temporary 'conc' column so it doesn't conflict during joins later
+  stream_df$conc <- NULL
+  
+  return(stream_df)
 }
 
 # ------------------------------------------------------------------------------
@@ -903,30 +877,26 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
       state <- sidebar_data$state()
       req(state$treat, state$res_mix, state$solids_process, state$data_source)
       
-      base_frame <- app_data$targets |>
-        dplyr::select(substance_name, cas_rn)
+      # BASE R REFACTOR: Subsetting and assigning directly is faster than loading a wrapper package.
+      base_frame <- app_data$targets[, c("substance_name", "cas_rn"), drop = FALSE]
       
       if (state$data_source == "lab") {
-        return(
-          base_frame |>
-            dplyr::mutate(
-              mass_liq = 0,
-              res_col_liq = "N/A",
-              trace_err_liq = "Lab mode pending",
-              trace_vol_liq = NA_real_,
-              trace_unit_liq = NA_character_,
-              trace_conc_liq = NA_real_,
-              trace_source_liq = NA_character_,
-              mass_sol = 0,
-              res_col_sol = "N/A",
-              trace_err_sol = "Lab mode pending",
-              trace_vol_sol = NA_real_,
-              trace_unit_sol = NA_character_,
-              trace_conc_sol = NA_real_,
-              trace_source_sol = NA_character_,
-              aggregate_kg = 0
-            )
-        )
+        base_frame$mass_liq <- 0
+        base_frame$res_col_liq <- "N/A"
+        base_frame$trace_err_liq <- "Lab mode pending"
+        base_frame$trace_vol_liq <- NA_real_
+        base_frame$trace_unit_liq <- NA_character_
+        base_frame$trace_conc_liq <- NA_real_
+        base_frame$trace_source_liq <- NA_character_
+        base_frame$mass_sol <- 0
+        base_frame$res_col_sol <- "N/A"
+        base_frame$trace_err_sol <- "Lab mode pending"
+        base_frame$trace_vol_sol <- NA_real_
+        base_frame$trace_unit_sol <- NA_character_
+        base_frame$trace_conc_sol <- NA_real_
+        base_frame$trace_source_sol <- NA_character_
+        base_frame$aggregate_kg <- 0
+        return(base_frame)
       }
       
       current_reg <- MATRIX_REGISTRY[
@@ -935,6 +905,9 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
           MATRIX_REGISTRY$solids == state$solids_process,
       ]
       
+      # ----------------------------------------------------
+      # Process Liquid Stream (Base R Refactor)
+      # ----------------------------------------------------
       if ("liq" %in% state$active_streams) {
         liq_df <- calc_stream(
           base_frame,
@@ -945,34 +918,31 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
           "liq"
         )
         
-        base_frame <- base_frame |>
-          dplyr::left_join(
-            liq_df |>
-              dplyr::select(-conc) |>
-              dplyr::rename(
-                mass_liq = mass_kg,
-                res_col_liq = res_col,
-                trace_err_liq = trace_err,
-                trace_vol_liq = trace_vol,
-                trace_unit_liq = trace_unit,
-                trace_conc_liq = trace_conc,
-                trace_source_liq = trace_source
-              ),
-            by = "cas_rn"
-          )
+        # Manually assign prefix/suffixes to prevent column collisions during merge
+        names(liq_df)[names(liq_df) == "mass_kg"]      <- "mass_liq"
+        names(liq_df)[names(liq_df) == "res_col"]      <- "res_col_liq"
+        names(liq_df)[names(liq_df) == "trace_err"]    <- "trace_err_liq"
+        names(liq_df)[names(liq_df) == "trace_vol"]    <- "trace_vol_liq"
+        names(liq_df)[names(liq_df) == "trace_unit"]   <- "trace_unit_liq"
+        names(liq_df)[names(liq_df) == "trace_conc"]   <- "trace_conc_liq"
+        names(liq_df)[names(liq_df) == "trace_source"] <- "trace_source_liq"
+        
+        # Base R Join: merge() replaces dplyr::left_join()
+        base_frame <- merge(base_frame, liq_df, by = "cas_rn", all.x = TRUE)
+        
       } else {
-        base_frame <- base_frame |>
-          dplyr::mutate(
-            mass_liq = 0,
-            res_col_liq = "N/A",
-            trace_err_liq = "Stream manually disabled.",
-            trace_vol_liq = NA_real_,
-            trace_unit_liq = NA_character_,
-            trace_conc_liq = NA_real_,
-            trace_source_liq = NA_character_
-          )
+        base_frame$mass_liq         <- 0
+        base_frame$res_col_liq      <- "N/A"
+        base_frame$trace_err_liq    <- "Stream manually disabled."
+        base_frame$trace_vol_liq    <- NA_real_
+        base_frame$trace_unit_liq   <- NA_character_
+        base_frame$trace_conc_liq   <- NA_real_
+        base_frame$trace_source_liq <- NA_character_
       }
       
+      # ----------------------------------------------------
+      # Process Solids Stream (Base R Refactor)
+      # ----------------------------------------------------
       if ("sol" %in% state$active_streams) {
         sol_df <- calc_stream(
           base_frame,
@@ -983,55 +953,50 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
           "sol"
         )
         
-        base_frame <- base_frame |>
-          dplyr::left_join(
-            sol_df |>
-              dplyr::select(-conc) |>
-              dplyr::rename(
-                mass_sol = mass_kg,
-                res_col_sol = res_col,
-                trace_err_sol = trace_err,
-                trace_vol_sol = trace_vol,
-                trace_unit_sol = trace_unit,
-                trace_conc_sol = trace_conc,
-                trace_source_sol = trace_source
-              ),
-            by = "cas_rn"
-          )
+        names(sol_df)[names(sol_df) == "mass_kg"]      <- "mass_sol"
+        names(sol_df)[names(sol_df) == "res_col"]      <- "res_col_sol"
+        names(sol_df)[names(sol_df) == "trace_err"]    <- "trace_err_sol"
+        names(sol_df)[names(sol_df) == "trace_vol"]    <- "trace_vol_sol"
+        names(sol_df)[names(sol_df) == "trace_unit"]   <- "trace_unit_sol"
+        names(sol_df)[names(sol_df) == "trace_conc"]   <- "trace_conc_sol"
+        names(sol_df)[names(sol_df) == "trace_source"] <- "trace_source_sol"
+        
+        base_frame <- merge(base_frame, sol_df, by = "cas_rn", all.x = TRUE)
+        
       } else {
-        base_frame <- base_frame |>
-          dplyr::mutate(
-            mass_sol = 0,
-            res_col_sol = "N/A",
-            trace_err_sol = "Stream manually disabled.",
-            trace_vol_sol = NA_real_,
-            trace_unit_sol = NA_character_,
-            trace_conc_sol = NA_real_,
-            trace_source_sol = NA_character_
-          )
+        base_frame$mass_sol         <- 0
+        base_frame$res_col_sol      <- "N/A"
+        base_frame$trace_err_sol    <- "Stream manually disabled."
+        base_frame$trace_vol_sol    <- NA_real_
+        base_frame$trace_unit_sol   <- NA_character_
+        base_frame$trace_conc_sol   <- NA_real_
+        base_frame$trace_source_sol <- NA_character_
       }
       
-      base_frame |>
-        dplyr::mutate(
-          dplyr::across(dplyr::starts_with("mass"), \(x) dplyr::coalesce(x, 0)),
-          aggregate_kg = mass_liq + mass_sol
-        )
+      # ----------------------------------------------------
+      # Aggregate Totals (Base R Refactor)
+      # Replace NAs with 0 natively instead of coalesce()
+      # ----------------------------------------------------
+      base_frame$mass_liq[is.na(base_frame$mass_liq)] <- 0
+      base_frame$mass_sol[is.na(base_frame$mass_sol)] <- 0
+      base_frame$aggregate_kg <- base_frame$mass_liq + base_frame$mass_sol
+      
+      return(base_frame)
     })
     
     final_display_data <- reactive({
       df <- base_data()
       
+      # BASE R REFACTOR: Replaces filter()
       if (!is.null(input$cas_filter) && length(input$cas_filter) > 0) {
-        df <- df |>
-          dplyr::filter(cas_rn %in% input$cas_filter)
+        df <- df[df$cas_rn %in% input$cas_filter, , drop = FALSE]
       }
       
       if (isTRUE(input$hide_zero)) {
-        df <- df |>
-          dplyr::filter(aggregate_kg > APP_CONFIG$zero_tol)
+        df <- df[df$aggregate_kg > APP_CONFIG$zero_tol, , drop = FALSE]
       }
       
-      df
+      return(df)
     })
     
     output$top_ribbon <- renderUI({
@@ -1123,14 +1088,9 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
       df <- final_display_data()
       state <- sidebar_data$state()
       
-      export_df <- df |>
-        dplyr::select(
-          `Substance` = substance_name,
-          `CAS` = cas_rn,
-          `Liquids (kg_y)` = mass_liq,
-          `Solids (kg_y)` = mass_sol,
-          `Total (kg_y)` = aggregate_kg
-        )
+      # BASE R REFACTOR: Replaces explicit select() for column reorganization
+      export_df <- df[, c("substance_name", "cas_rn", "mass_liq", "mass_sol", "aggregate_kg")]
+      colnames(export_df) <- c("Substance", "CAS", "Liquids (kg_y)", "Solids (kg_y)", "Total (kg_y)")
       
       csv_out <- character()
       con <- textConnection("csv_out", "w", local = TRUE)
@@ -1264,12 +1224,12 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
               is_over <- data$aggregate_kg[index] >= APP_CONFIG$threshold_kg
               
               if (is_over && is_mandatory) {
-                htmltools::tagList(
+                tags$div(
                   tags$span(value, class = "fw-bold text-danger"),
                   tags$span(" REPORTABLE", class = "badge bg-danger ms-2")
                 )
               } else if (is_over && !is_mandatory) {
-                htmltools::tagList(
+                tags$div(
                   tags$span(value, class = "fw-bold text-warning"),
                   tags$span(" OVER MASS (EXEMPT FLOW)", class = "badge bg-warning text-dark ms-2")
                 )
@@ -1500,45 +1460,13 @@ ui <- page_sidebar(
   title = "NPRI PFAS Compliance Engine",
   theme = my_theme,
   js_download_script,
+  gatekeeper_ui,
   sidebar = mod_sidebar_ui("app_sidebar"),
   uiOutput(NS("app_dashboard", "top_ribbon")),
   mod_dashboard_ui("app_dashboard")
 )
 
 server <- function(input, output, session) {
-  
-  # ==============================================================================
-  # Gatekeeper Modal
-  # ==============================================================================
-  # We wrap this in an onFlushed observer to ensure the WebAssembly environment
-  # waits for the DOM to render before attempting to trigger the modal.
-  observeEvent(session$onFlushed, once = TRUE, {
-    showModal(
-      modalDialog(
-        title = "Restricted Access",
-        tags$p("This PFAS calculator is an internal tool for authorized wastewater facility users only"),
-        tags$p("Please enter the access code to continue:"),
-        textInput("gate_pass", NULL, placeholder = "Enter password..."),
-        actionButton("gate_submit", "Unlock", class = "btn-primary w-100"),
-        footer = NULL,        # Removes the default "Dismiss" button
-        keyboard = FALSE,     # Prevents closing with the Esc key
-        backdrop = "static"   # Prevents closing by clicking outside the modal
-      )
-    )
-  })
-  
-  # Check password when the button is clicked
-  observeEvent(input$gate_submit, {
-    if (input$gate_pass == "NPRI2026") {
-      removeModal()
-    } else {
-      showNotification("Incorrect access code.", type = "error", duration = 3)
-      # Clear the input field after a failed attempt
-      updateTextInput(session, "gate_pass", value = "")
-    }
-  })
-  # ==============================================================================
-  
   sidebar_state <- mod_sidebar_server("app_sidebar")
   mod_dashboard_server("app_dashboard", sidebar_state, app_data)
 }
