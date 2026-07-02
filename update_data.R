@@ -126,20 +126,26 @@ message("Step 3: Exporting datasets to local directories...")
 dir.create(CONFIG$dir_rds, recursive = TRUE, showWarnings = FALSE)
 dir.create(CONFIG$dir_csv, recursive = TRUE, showWarnings = FALSE)
 
-# Dual-Export Loop
+# Capture the exact time of the scrape
+scrape_timestamp <- format(Sys.Date(), "%B %d, %Y")
+
+# Dual-Export Loop[cite: 2]
 iwalk(all_tables_clean, function(df, table_name) {
   
-  # 1. Save as RDS (Optimized for the Shiny App)
+  # Embed the timestamp into the dataframe as a hidden attribute
+  attr(df, "scrape_date") <- scrape_timestamp
+  
+  # 1. Save as RDS (Optimized for the Shiny App)[cite: 2]
   rds_path <- file.path(CONFIG$dir_rds, paste0(table_name, ".rds"))
   saveRDS(df, rds_path)
   
-  # 2. Save as CSV (Human-readable archive for validation)
+  # 2. Save as CSV (Human-readable archive for validation)[cite: 2]
   csv_path <- file.path(CONFIG$dir_csv, paste0(table_name, ".csv"))
   write_csv(df, csv_path)
   
 })
 
-# Clean up memory pointers to prevent RStudio 'xml_child' warnings
+# Clean up memory pointers to prevent RStudio 'xml_child' warnings[cite: 2]
 rm(raw_html, table_nodes, all_tables_clean)
 
 message("\n==================================================")
