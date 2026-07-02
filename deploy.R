@@ -16,15 +16,9 @@ file.copy("data/rds/Table_1.rds", file.path(build_dir, "data/rds/Table_1.rds"))
 file.copy("data/rds/Table_7.rds", file.path(build_dir, "data/rds/Table_7.rds"))
 file.copy("data/rds/Table_8.rds", file.path(build_dir, "data/rds/Table_8.rds"))
 
-message("Step 2: Building Shinylive app into docs/ folder...")
+message("Step 2: Defining zero-second HTML gatekeeper...")
 
-# 3. Export the app from the staging directory to the docs folder
-# Using the correct R-package arguments (appdir and destdir)
-shinylive::export(appdir = build_dir, destdir = "docs")
-
-message("Step 3: Injecting zero-second HTML gatekeeper...")
-
-# 4. Define the Gatekeeper as pure HTML
+# 3. Define the Gatekeeper as pure HTML
 gatekeeper_html <- '
 <div id="simple-gatekeeper" style="position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: #f8f9fa; z-index: 999999; display: flex; flex-direction: column; justify-content: center; align-items: center; font-family: system-ui, sans-serif;">
   <div style="box-shadow: 0 4px 6px rgba(0,0,0,0.1); padding: 3rem; border-radius: 8px; background: white; text-align: center; max-width: 400px;">
@@ -51,10 +45,22 @@ gatekeeper_html <- '
 </div>
 '
 
-# 5. Append the HTML to the bottom of the generated index.html file
-cat(gatekeeper_html, file = "docs/index.html", append = TRUE)
+message("Step 3: Building Shinylive app and injecting gatekeeper natively...")
 
-# 6. Clean up the temporary staging directory
+# 4. Export using native template_params instead of appending post-build
+shinylive::export(
+  appdir = build_dir, 
+  destdir = "docs",
+  template_params = list(
+    include_after_body = gatekeeper_html
+  )
+)
+
+# 5. Clean up the temporary staging directory
 unlink(build_dir, recursive = TRUE)
 
-message("SUCCESS: App is ready for GitHub deployment!")
+message("=====================================================")
+message(" SUCCESS: App is ready for testing or deployment!")
+message("=====================================================")
+message(" -> To test locally, run this in your console:")
+message("    httpuv::runStaticServer('docs/')")
