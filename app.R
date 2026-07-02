@@ -1,7 +1,7 @@
 # ==============================================================================
 #
 # Purpose: PFAS Calculator to assist Wastewater Plants with NPRI Reporting
-# Deployment: Shinylive - shinylive::export(".", "docs")
+# Deployment: Shinylive - shinylive::export(".", "docs", include_files = "data/")
 # Author: CJGAdam
 # Criteria source: https://www.canada.ca/en/environment-climate-change/services/national-pollutant-release-inventory/report/pfas.html
 # ==============================================================================
@@ -226,21 +226,17 @@ load_app_data <- function() {
     ))
   }
   
-  raw_time <- tryCatch({
-    mtime <- file.info(file.path(dir_path, "Table_1.rds"))$mtime
-    
-    if (is.na(mtime) || as.numeric(format(mtime, "%Y")) < 2024) {
-      "Current ECCC Baseline"
-    } else {
-      format(as.Date(mtime), "%B %d, %Y")
-    }
-  }, error = function(e) "Current ECCC Baseline")
+  # Read the raw Table 1 file to extract the embedded date
+  raw_table_1 <- readRDS(file.path(dir_path, "Table_1.rds"))
+  
+  # Extract the embedded date attribute (fallback to "Current ECCC Baseline" if missing)
+  embedded_date <- attr(raw_table_1, "scrape_date") %||% "Current ECCC Baseline"
   
   list(
-    targets     = clean_pfas(readRDS(file.path(dir_path, "Table_1.rds"))),
+    targets     = clean_pfas(raw_table_1),
     eff_spec    = clean_pfas(readRDS(file.path(dir_path, "Table_7.rds"))),
     bio_spec    = clean_pfas(readRDS(file.path(dir_path, "Table_8.rds"))),
-    scrape_date = raw_time,
+    scrape_date = embedded_date,
     status      = "Loaded"
   )
 }
@@ -680,12 +676,12 @@ mod_dashboard_ui <- function(id) {
                   tags$h6("Individual Mass Threshold", class = "fw-bold text-danger text-uppercase mb-3"),
                   tags$p(
                     class = "text-muted",
-                    HTML("Reporting is mandatory for <strong>each individual</strong> Part 1, Group C PFAS if its specific, combined facility-wide mass is ≥ 1.0 kg/year.")
+                    HTML("Reporting is mandatory for <strong>each individual</strong> Part 1, Group C PFAS if its specific, combined facility-wide mass is >= 1.0 kg/year.")
                   ),
                   tags$div(
                     class = "d-inline-flex align-items-center gap-2 px-3 py-2 bg-danger bg-opacity-10 rounded border border-danger mb-2",
                     bs_icon("exclamation-circle-fill", class = "text-danger"),
-                    tags$h4("≥ 1.0 kg/year", class = "text-danger fw-bold mb-0")
+                    tags$h4(">= 1.0 kg/year", class = "text-danger fw-bold mb-0")
                   )
                 ),
                 
@@ -725,7 +721,7 @@ mod_dashboard_ui <- function(id) {
                     class = "p-3 bg-white rounded border shadow-sm mb-3",
                     tags$p(class = "fw-bold mb-1 text-primary small", "Liquid Pathway:"),
                     tags$code(
-                      "PFAS (kg) = Volume (L) × Concentration (ng/L) × 10⁻¹² kg/ng",
+                      "PFAS (kg) = Volume (L) * Concentration (ng/L) * 10^-12 kg/ng",
                       class = "text-dark"
                     )
                   ),
@@ -734,7 +730,7 @@ mod_dashboard_ui <- function(id) {
                     class = "p-3 bg-white rounded border shadow-sm",
                     tags$p(class = "fw-bold mb-1 text-success small", "Solid Pathway:"),
                     tags$code(
-                      "PFAS (kg) = Weight (tonnes) × 10⁶ g/t × Concentration (ng/g) × 10⁻¹² kg/ng",
+                      "PFAS (kg) = Weight (tonnes) * 10^6 g/t * Concentration (ng/g) * 10^-12 kg/ng",
                       class = "text-dark"
                     )
                   )
@@ -765,7 +761,7 @@ mod_dashboard_ui <- function(id) {
             card_body(
               class = "p-4",
               tags$p(
-                "Standard NPRI reporting is subject to a ≥ 0.1% concentration threshold. ",
+                "Standard NPRI reporting is subject to a >= 0.1% concentration threshold. ",
                 tags$strong("This does not apply to wastewater facilities.", class = "text-danger")
               ),
               tags$p(
@@ -1063,7 +1059,7 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
       } else if (!is_danger) {
         "All compounds < 1.0 kg/y"
       } else {
-        "≥ 1.0 kg/y and Flow ≥ 10 ML/d"
+        ">= 1.0 kg/y and Flow >= 10 ML/d"
       }
       
       status_icon <- if (!is_mandatory) {
@@ -1200,7 +1196,7 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
             tags$li(
               tags$strong("Effluent: "),
               sprintf(
-                "(Vol: %s %s) × (Conc: %s ng/L) × 10⁻¹² = %s kg/y",
+                "(Vol: %s %s) * (Conc: %s ng/L) * 10^-12 = %s kg/y",
                 row$trace_vol_liq,
                 row$trace_unit_liq,
                 signif(row$trace_conc_liq, 3),
@@ -1209,7 +1205,7 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
               tags$br(),
               tags$span(
                 class = "text-muted small ms-2",
-                sprintf("\u21B3 Source: %s", row$trace_source_liq)
+                sprintf(" Source: %s", row$trace_source_liq)
               )
             )
           }
@@ -1228,7 +1224,7 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
             tags$li(
               tags$strong("Biosolids: "),
               sprintf(
-                "(Mass: %s %s) × (Conc: %s ng/g) × 10⁻¹² = %s kg/y",
+                "(Mass: %s %s) * (Conc: %s ng/g) * 10^-12 = %s kg/y",
                 row$trace_vol_sol,
                 row$trace_unit_sol,
                 signif(row$trace_conc_sol, 3),
@@ -1237,14 +1233,14 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
               tags$br(),
               tags$span(
                 class = "text-muted small ms-2",
-                sprintf("\u21B3 Source: %s", row$trace_source_sol)
+                sprintf(" Source: %s", row$trace_source_sol)
               )
             )
           }
           
           tags$div(
             class = "p-3 bg-light border rounded small m-2",
-            tags$h6(class = "fw-bold text-primary mb-2", "\U0001F9EE Calculation Trace"),
+            tags$h6(class = "fw-bold text-primary mb-2", " Calculation Trace"),
             tags$ul(class = "list-unstyled mb-0 lh-lg", liq_trace, sol_trace)
           )
         },
@@ -1270,12 +1266,12 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
               if (is_over && is_mandatory) {
                 htmltools::tagList(
                   tags$span(value, class = "fw-bold text-danger"),
-                  tags$span("\U0001F6A8 REPORTABLE", class = "badge bg-danger ms-2")
+                  tags$span(" REPORTABLE", class = "badge bg-danger ms-2")
                 )
               } else if (is_over && !is_mandatory) {
                 htmltools::tagList(
                   tags$span(value, class = "fw-bold text-warning"),
-                  tags$span("\U0001F6A8 OVER MASS (EXEMPT FLOW)", class = "badge bg-warning text-dark ms-2")
+                  tags$span(" OVER MASS (EXEMPT FLOW)", class = "badge bg-warning text-dark ms-2")
                 )
               } else {
                 value
@@ -1514,22 +1510,25 @@ server <- function(input, output, session) {
   # ==============================================================================
   # Gatekeeper Modal
   # ==============================================================================
-  showModal(
-    modalDialog(
-      title = "Restricted Access",
-      tags$p("This PFAS calculator is an internal tool for authorized wastewater facility users only"),
-      tags$p("Please enter the access code to continue:"),
-      textInput("gate_pass", NULL, placeholder = "Enter password..."),
-      actionButton("gate_submit", "Unlock", class = "btn-primary w-100"),
-      footer = NULL,        # Removes the default "Dismiss" button
-      keyboard = FALSE,     # Prevents closing with the Esc key
-      backdrop = "static"   # Prevents closing by clicking outside the modal
+  # We wrap this in an onFlushed observer to ensure the WebAssembly environment
+  # waits for the DOM to render before attempting to trigger the modal.
+  observeEvent(session$onFlushed, once = TRUE, {
+    showModal(
+      modalDialog(
+        title = "Restricted Access",
+        tags$p("This PFAS calculator is an internal tool for authorized wastewater facility users only"),
+        tags$p("Please enter the access code to continue:"),
+        textInput("gate_pass", NULL, placeholder = "Enter password..."),
+        actionButton("gate_submit", "Unlock", class = "btn-primary w-100"),
+        footer = NULL,        # Removes the default "Dismiss" button
+        keyboard = FALSE,     # Prevents closing with the Esc key
+        backdrop = "static"   # Prevents closing by clicking outside the modal
+      )
     )
-  )
+  })
   
   # Check password when the button is clicked
   observeEvent(input$gate_submit, {
-    # Remember to change "NPRI2026" to your actual shared password!
     if (input$gate_pass == "NPRI2026") {
       removeModal()
     } else {

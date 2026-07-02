@@ -1,0 +1,7 @@
+type_of_use,run_off_coefficient_rc
+Heavy industrial use,0.75
+Light industrial use,0.65
+Paved and/or roofed,0.90
+Railroad yard areas,0.30
+Unimproved areas,0.20
+Grassed areas,0.25
