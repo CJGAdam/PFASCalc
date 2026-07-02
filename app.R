@@ -1,19 +1,18 @@
 # ==============================================================================
 #
 # Purpose: PFAS Calculator to assist Wastewater Plants with NPRI Reporting
-# Deployment: shinylive::export(".", "docs", include_files = c("data/rds/Table_1.rds", "data/rds/Table_7.rds", "data/rds/Table_8.rds"))
+# Deployment: Managed via local deploy.R script (shinylive::export + HTML injection)
 # Author: CJGAdam
 # Criteria source: https://www.canada.ca/en/environment-climate-change/services/national-pollutant-release-inventory/report/pfas.html
 # ==============================================================================
-# Dependencies (Optimized for WASM Load Time)
+# Dependencies (Optimized for WASM Load Time - Base R Data Manipulation)
 # ==============================================================================
 library(shiny)          # Core framework
 library(bslib)          # UI components and layout
 library(bsicons)        # SVG icons
 library(reactable)      # Interactive data tables
 library(htmltools)      # HTML construction
-library(shinyWidgets)   # Enhanced UI inputs (Retained for testing)
-# NOTE: poorman/dplyr have been completely removed. Base R handles all data logic.
+library(shinyWidgets)   # Enhanced UI inputs
 
 # Base R fallback for null coalescing
 `%||%` <- function(x, y) {
@@ -23,7 +22,6 @@ library(shinyWidgets)   # Enhanced UI inputs (Retained for testing)
 }
 
 # Client-side CSV download handler
-# Workaround for file download in Shinylive environment
 js_download_script <- tags$head(tags$script(HTML("
   $(document).on('shiny:sessioninitialized', function() {
     Shiny.addCustomMessageHandler('download_csv', function(message) {
@@ -40,43 +38,6 @@ js_download_script <- tags$head(tags$script(HTML("
     });
   });
 ")))
-
-# ==============================================================================
-# Gatekeeper Native UI Overlay
-# ==============================================================================
-gatekeeper_ui <- tags$div(
-  id = "simple-gatekeeper",
-  style = "position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: #f8f9fa; z-index: 9999; display: flex; flex-direction: column; justify-content: center; align-items: center;",
-  tags$div(
-    class = "shadow p-5 rounded bg-white text-center",
-    style = "max-width: 400px;",
-    bs_icon("lock-fill", size = "3rem", class = "text-primary mb-3"),
-    tags$h3("Restricted Access", class = "text-primary fw-bold mb-3"),
-    tags$p("This PFAS calculator is an internal tool for authorized facility users only.", class = "text-muted mb-4"),
-    tags$div(
-      class = "d-flex gap-2",
-      tags$input(
-        type = "password", 
-        id = "gate_pass", 
-        placeholder = "Enter access code...", 
-        class = "form-control",
-        onkeypress = "if(event.key === 'Enter') document.getElementById('unlock_btn').click();"
-      ),
-      tags$button(
-        "Unlock", 
-        id = "unlock_btn",
-        class = "btn btn-primary fw-bold", 
-        onclick = "
-        if(document.getElementById('gate_pass').value === 'NPRI2026') {
-          document.getElementById('simple-gatekeeper').style.display = 'none';
-        } else {
-          alert('Incorrect access code.');
-          document.getElementById('gate_pass').value = '';
-        }
-      ")
-    )
-  )
-)
 
 # ==============================================================================
 # Configuration
@@ -228,7 +189,7 @@ load_app_data <- function() {
   )
 }
 
-# Resolves matrix column names robustly.
+# Resolves matrix column names robustly
 resolve_matrix_col <- function(target_df, requested_col) {
   if (
     is.null(target_df) ||
@@ -275,10 +236,9 @@ resolve_matrix_col <- function(target_df, requested_col) {
   NA_character_
 }
 
-# Executes mass balance calculations for a given waste stream
+# Executes mass balance calculations for a given waste stream (Base R Refactor)
 calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
   
-  # BASE R REFACTOR: Build a direct dataframe instead of using mutate()
   safe_return <- function(msg, col_status = "ERR") {
     data.frame(
       cas_rn       = base_df$cas_rn,
@@ -314,19 +274,15 @@ calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
     if (unit == "t/y") APP_CONFIG$t_to_g else APP_CONFIG$kg_to_g
   }
   
-  # BASE R REFACTOR: Subsetting and column assignment
-  # Grab only the CAS and the specific concentration column we need
   stream_df <- target_df[, c("cas_rn", target_col)]
   colnames(stream_df) <- c("cas_rn", "conc")
   
-  # Perform math using Base R vectorized ifelse
   stream_df$mass_kg <- ifelse(
     is.na(stream_df$conc),
     0,
     safe_vol * unit_conv * stream_df$conc * APP_CONFIG$ng_to_kg
   )
   
-  # Assign trace data
   stream_df$res_col <- target_col
   stream_df$trace_vol <- safe_vol
   stream_df$trace_unit <- unit
@@ -334,7 +290,6 @@ calc_stream <- function(base_df, target_df, reg_row, volume, unit, type) {
   stream_df$trace_source <- audit_label
   stream_df$trace_err <- NA_character_
   
-  # Remove the temporary 'conc' column so it doesn't conflict during joins later
   stream_df$conc <- NULL
   
   return(stream_df)
@@ -374,7 +329,6 @@ dense_metric_card <- function(title, value, subtext, icon_name, bg_class) {
   )
 }
 
-# Pre-load data to make `app_data` available to UI components at startup
 app_data <- load_app_data()
 
 # ==============================================================================
@@ -768,10 +722,8 @@ mod_sidebar_server <- function(id) {
     observeEvent(input$treat, {
       req(input$treat)
       
-      valid_mixes <- MATRIX_REGISTRY$mix[
-        MATRIX_REGISTRY$treat == input$treat
-      ] |>
-        unique()
+      valid_mixes <- MATRIX_REGISTRY$mix[MATRIX_REGISTRY$treat == input$treat]
+      valid_mixes <- unique(valid_mixes)
       
       updateRadioGroupButtons(
         session,
@@ -785,10 +737,9 @@ mod_sidebar_server <- function(id) {
       req(input$treat, input$res_mix)
       
       valid_solids <- MATRIX_REGISTRY$solids[
-        MATRIX_REGISTRY$treat == input$treat &
-          MATRIX_REGISTRY$mix == input$res_mix
-      ] |>
-        unique()
+        MATRIX_REGISTRY$treat == input$treat & MATRIX_REGISTRY$mix == input$res_mix
+      ]
+      valid_solids <- unique(valid_solids)
       
       updatePickerInput(
         session,
@@ -854,17 +805,7 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
       state <- sidebar_data$state()
       req(state$flow_unit)
       
-      safe_flow <- state$flow_val
-      
-      safe_flow <- if (
-        is.null(safe_flow) ||
-        length(safe_flow) == 0 ||
-        is.na(safe_flow)
-      ) {
-        0
-      } else {
-        safe_flow
-      }
+      safe_flow <- if (is.null(state$flow_val) || length(state$flow_val) == 0 || is.na(state$flow_val)) 0 else state$flow_val
       
       if (state$flow_unit == "m³/y") {
         (safe_flow / 1000) / 365
@@ -877,7 +818,7 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
       state <- sidebar_data$state()
       req(state$treat, state$res_mix, state$solids_process, state$data_source)
       
-      # BASE R REFACTOR: Subsetting and assigning directly is faster than loading a wrapper package.
+      # BASE R: Create base frame safely
       base_frame <- app_data$targets[, c("substance_name", "cas_rn"), drop = FALSE]
       
       if (state$data_source == "lab") {
@@ -902,11 +843,12 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
       current_reg <- MATRIX_REGISTRY[
         MATRIX_REGISTRY$treat == state$treat &
           MATRIX_REGISTRY$mix == state$res_mix &
-          MATRIX_REGISTRY$solids == state$solids_process,
+          MATRIX_REGISTRY$solids == state$solids_process, 
+        , drop = FALSE
       ]
       
       # ----------------------------------------------------
-      # Process Liquid Stream (Base R Refactor)
+      # Process Liquid Stream
       # ----------------------------------------------------
       if ("liq" %in% state$active_streams) {
         liq_df <- calc_stream(
@@ -918,7 +860,6 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
           "liq"
         )
         
-        # Manually assign prefix/suffixes to prevent column collisions during merge
         names(liq_df)[names(liq_df) == "mass_kg"]      <- "mass_liq"
         names(liq_df)[names(liq_df) == "res_col"]      <- "res_col_liq"
         names(liq_df)[names(liq_df) == "trace_err"]    <- "trace_err_liq"
@@ -927,7 +868,6 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
         names(liq_df)[names(liq_df) == "trace_conc"]   <- "trace_conc_liq"
         names(liq_df)[names(liq_df) == "trace_source"] <- "trace_source_liq"
         
-        # Base R Join: merge() replaces dplyr::left_join()
         base_frame <- merge(base_frame, liq_df, by = "cas_rn", all.x = TRUE)
         
       } else {
@@ -941,7 +881,7 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
       }
       
       # ----------------------------------------------------
-      # Process Solids Stream (Base R Refactor)
+      # Process Solids Stream
       # ----------------------------------------------------
       if ("sol" %in% state$active_streams) {
         sol_df <- calc_stream(
@@ -973,10 +913,7 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
         base_frame$trace_source_sol <- NA_character_
       }
       
-      # ----------------------------------------------------
-      # Aggregate Totals (Base R Refactor)
-      # Replace NAs with 0 natively instead of coalesce()
-      # ----------------------------------------------------
+      # Aggregate Totals (Replace NAs securely)
       base_frame$mass_liq[is.na(base_frame$mass_liq)] <- 0
       base_frame$mass_sol[is.na(base_frame$mass_sol)] <- 0
       base_frame$aggregate_kg <- base_frame$mass_liq + base_frame$mass_sol
@@ -987,7 +924,6 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
     final_display_data <- reactive({
       df <- base_data()
       
-      # BASE R REFACTOR: Replaces filter()
       if (!is.null(input$cas_filter) && length(input$cas_filter) > 0) {
         df <- df[df$cas_rn %in% input$cas_filter, , drop = FALSE]
       }
@@ -1088,7 +1024,6 @@ mod_dashboard_server <- function(id, sidebar_data, app_data) {
       df <- final_display_data()
       state <- sidebar_data$state()
       
-      # BASE R REFACTOR: Replaces explicit select() for column reorganization
       export_df <- df[, c("substance_name", "cas_rn", "mass_liq", "mass_sol", "aggregate_kg")]
       colnames(export_df) <- c("Substance", "CAS", "Liquids (kg_y)", "Solids (kg_y)", "Total (kg_y)")
       
@@ -1460,7 +1395,6 @@ ui <- page_sidebar(
   title = "NPRI PFAS Compliance Engine",
   theme = my_theme,
   js_download_script,
-  gatekeeper_ui,
   sidebar = mod_sidebar_ui("app_sidebar"),
   uiOutput(NS("app_dashboard", "top_ribbon")),
   mod_dashboard_ui("app_dashboard")
